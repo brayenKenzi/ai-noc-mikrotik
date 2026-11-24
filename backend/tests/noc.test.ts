@@ -22,6 +22,17 @@ import { LinkWatchdogEngine, resolveRouterDutyProfile } from '../src/linkWatchdo
 import { TopologyStore } from '../src/topologyStore.js';
 import { PppoeMassDisconnectWatchdog } from '../src/pppoeWatchdog.js';
 import { AiMemoryStore, detectTeachingFact } from '../src/aiMemoryStore.js';
+import { SfpOpticalWatchdog, parseSfpMonitorRow } from '../src/sfpMonitor.js';
+import {
+  extractCustomerLookupQuery,
+  formatCustomerLookupPlainText,
+  matchSessionRows,
+} from '../src/customerLookup.js';
+import {
+  buildRscFromSectionRows,
+  computeRscDiff,
+  toSafeRscFileName,
+} from '../src/rscBackupManager.js';
 import {
   executeApprovedProposal,
   hasWriteCredentialsForRouter,
@@ -846,5 +857,85 @@ describe('Human-in-the-Loop Approval Store & Deterministic Agent Diagnosis', () 
       if (prevSpvSecret === undefined) delete process.env.SPV_EXEC_SECRET;
       else process.env.SPV_EXEC_SECRET = prevSpvSecret;
     }
+  });
+
+  it('monitors SFP optical dBm, matches PPPoE/Hotspot customers, and exports clean .rsc with diff', () => {
+    const crs = DEFAULT_ROUTERS[0]!;
+
+    // 1. SFP Optical dBm Monitor & Watchdog
+    const idleSlot = parseSfpMonitorRow('sfp-sfpplus4', { status: 'no-link', 'sfp-module-present': 'false' });
+    assert.equal(idleSlot.health, 'empty');
+
+    const warnPort = parseSfpMonitorRow('sfp5-TO LOLAN-BANGO', {
+      status: 'link-ok',
+      'sfp-module-present': 'true',
+      'sfp-rx-power': '-21.023',
+      'sfp-tx-power': '-3',
+      'sfp-temperature': '46',
+      'sfp-vendor-name': 'Tarmoc',
+    });
+    assert.equal(warnPort.health, 'warning');
+    assert.equal(warnPort.rxPowerDbm, -21.02);
+
+    const critPort = parseSfpMonitorRow('sfp5-TO LOLAN-BANGO', {
+      status: 'link-ok',
+      'sfp-module-present': 'true',
+      'sfp-rx-power': '-25.45',
+      'sfp-tx-power': '-3.1',
+      'sfp-temperature': '49',
+    });
+    assert.equal(critPort.health, 'critical');
+
+    const sfpWatch = new SfpOpticalWatchdog();
+    assert.equal(sfpWatch.evaluate(crs, [warnPort], -24, 3).events.length, 0);
+    assert.equal(sfpWatch.evaluate(crs, [critPort], -24, 3).events.length, 0);
+    assert.equal(sfpWatch.evaluate(crs, [critPort], -24, 3).events.length, 0);
+    const thirdEval = sfpWatch.evaluate(crs, [critPort], -24, 3);
+    assert.equal(thirdEval.events.length, 1);
+    assert.equal(thirdEval.events[0]?.kind, 'high_attenuation');
+
+    // 2. Customer Lookup Parser & Plain-Text Formatter
+    assert.equal(extractCustomerLookupQuery('/cek budi_mongkonai'), 'budi_mongkonai');
+    assert.equal(extractCustomerLookupQuery('SPV NOC, cek pelanggan andika01'), 'andika01');
+    assert.equal(extractCustomerLookupQuery('cek semua router'), null);
+
+    const matches = matchSessionRows(
+      crs,
+      [{ name: 'budi_mongkonai', address: '10.50.1.22', 'caller-id': 'AA:BB:CC:11:22:33', uptime: '2d4h', radius: 'true' }],
+      [{ user: 'voucher_budi', address: '10.60.0.15', 'mac-address': 'DD:EE:FF:44:55:66', uptime: '1h12m', 'bytes-in': '10485760', 'bytes-out': '52428800' }],
+      'budi',
+    );
+    assert.equal(matches.length, 2);
+    const plainLookup = formatCustomerLookupPlainText({
+      query: 'budi',
+      searchedRouters: 7,
+      matches,
+      relatedLogs: [],
+      checkedAt: new Date().toISOString(),
+    });
+    assert.ok(!plainLookup.includes('*'));
+    assert.ok(plainLookup.includes('DITEMUKAN 2 SESI AKTIF'));
+
+    // 3. Clean .rsc Export (strips volatile counters + redacts secrets) & Config Diff
+    assert.equal(toSafeRscFileName('CCR-Pusat MomoNet / Core'), 'CCR-Pusat-MomoNet-Core.rsc');
+    const rsc1 = buildRscFromSectionRows(crs, { 'board-name': 'CRS317', version: '7.15' }, [
+      {
+        cliPath: '/radius',
+        rows: [{ '.id': '*1', address: '10.10.10.5', secret: 'supersecret123', service: 'ppp,hotspot' }],
+      },
+      {
+        cliPath: '/ip firewall filter',
+        rows: [{ '.id': '*2', action: 'accept', chain: 'input', bytes: '9999999', packets: '8888' }],
+      },
+    ]);
+    assert.ok(!rsc1.includes('supersecret123'));
+    assert.ok(rsc1.includes('<REDACTED>'));
+    assert.ok(!rsc1.includes('9999999'));
+    assert.equal(computeRscDiff(rsc1, rsc1).addedLines, 0);
+
+    const rsc2 = `${rsc1}\n/ip address\nadd address=10.99.0.1/24 interface=vlan2000-CMK\n`;
+    const diff = computeRscDiff(rsc1, rsc2);
+    assert.equal(diff.addedLines, 2);
+    assert.equal(diff.removedLines, 0);
   });
 });

@@ -154,6 +154,65 @@ export interface LiveAlertSettings {
   waTokenConfigured: boolean;
 }
 
+export interface LiveSfpOpticalMetric {
+  name: string;
+  modulePresent: boolean;
+  linkOk: boolean;
+  rxPowerDbm: number | null;
+  txPowerDbm: number | null;
+  temperatureC: number | null;
+  wavelengthNm: number | null;
+  vendor: string;
+  health: 'ok' | 'warning' | 'critical' | 'empty';
+}
+
+export interface LiveCustomerSessionMatch {
+  type: 'pppoe' | 'hotspot';
+  routerId: string;
+  routerName: string;
+  username: string;
+  address: string;
+  macOrCallerId: string;
+  uptime: string;
+  serviceOrServer: string;
+  rxMbps: number | null;
+  txMbps: number | null;
+  totalRxMb: number | null;
+  totalTxMb: number | null;
+  viaRadius: boolean;
+}
+
+export interface LiveCustomerLookupResult {
+  query: string;
+  searchedRouters: number;
+  matches: LiveCustomerSessionMatch[];
+  relatedLogs: LiveSyslogEntry[];
+  checkedAt: string;
+}
+
+export interface LiveRscBackupEntry {
+  routerId: string;
+  routerName: string;
+  fileName: string;
+  folderPath: string;
+  lastBackupAt: string;
+  sizeBytes: number;
+  lineCount: number;
+  addedLines: number;
+  removedLines: number;
+  diffPreview: string[];
+  status: 'ok' | 'unchanged' | 'error';
+  error?: string;
+}
+
+export interface LiveRscBackupSummary {
+  folderName: string;
+  lastRunAt: string | null;
+  lastGitSyncAt: string | null;
+  lastGitSyncStatus: string;
+  entries: LiveRscBackupEntry[];
+}
+
 export interface LiveRouterTelemetry {
   routerId: string;
   reachable: boolean;
@@ -171,6 +230,7 @@ export interface LiveRouterTelemetry {
   bgpPeersEstablished: number;
   bgpPeersTotal: number;
   interfaces: { name: string; running: boolean; disabled: boolean; rxMbps: number; txMbps: number }[];
+  sfpOptics?: LiveSfpOpticalMetric[];
   ping?: LivePingMetric | null;
   interfacePingResult?: LivePingMetric | null;
   watchedLinks?: LiveWatchedLinkStatus[];
@@ -222,7 +282,7 @@ export interface LiveSpvReportEntry {
   routerName: string;
   agentName: string;
   severity: 'info' | 'warning' | 'critical';
-  category: 'ping' | 'radius' | 'offline' | 'resource' | 'hotspot' | 'recovery';
+  category: 'ping' | 'radius' | 'offline' | 'resource' | 'hotspot' | 'link' | 'pppoe_mass' | 'sfp' | 'recovery';
   message: string;
   sentToWa: boolean;
 }
@@ -274,6 +334,7 @@ export interface LiveNocSnapshot {
   topologyLinks?: LiveTopologyLink[];
   topologyPositions?: LiveTopologyNodePosition[];
   aiMemory?: LiveAiMemorySummary;
+  rscBackups?: LiveRscBackupSummary;
   approvals: LiveApprovalTicket[];
   globalLogs?: LiveSyslogEntry[];
   radiusAlerts?: LiveRadiusAlert[];
@@ -807,6 +868,48 @@ export function useNocLive() {
     if (json.data?.snapshot) setSnapshot(json.data.snapshot);
   }, []);
 
+  const searchCustomers = useCallback(async (query: string): Promise<LiveCustomerLookupResult> => {
+    const res = await fetch(`/api/customers/search?q=${encodeURIComponent(query.trim())}`, {
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    });
+    const json = (await res.json()) as { success: boolean; data?: LiveCustomerLookupResult; error?: string };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error ?? 'Gagal mencari pelanggan');
+    }
+    return json.data;
+  }, []);
+
+  const runRscBackupNow = useCallback(async (): Promise<LiveRscBackupSummary> => {
+    const res = await fetch('/api/backups/rsc/run', {
+      method: 'POST',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    });
+    const json = (await res.json()) as {
+      success: boolean;
+      data?: { summary: LiveRscBackupSummary; snapshot: LiveNocSnapshot };
+      error?: string;
+    };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error ?? 'Gagal menjalankan backup .rsc');
+    }
+    if (json.data.snapshot) setSnapshot(json.data.snapshot);
+    return json.data.summary;
+  }, []);
+
+  const fetchRscPreview = useCallback(async (fileName: string): Promise<string> => {
+    const res = await fetch(`/api/backups/rsc/files/${encodeURIComponent(fileName)}`, {
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    });
+    const json = (await res.json()) as { success: boolean; data?: { content: string }; error?: string };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error ?? 'Gagal membaca isi file .rsc');
+    }
+    return json.data.content;
+  }, []);
+
   return {
     authState,
     adminUser,
@@ -833,6 +936,9 @@ export function useNocLive() {
     saveTopologyPositions,
     addAiMemoryFact,
     deleteAiMemoryFact,
+    searchCustomers,
+    runRscBackupNow,
+    fetchRscPreview,
     updateAlertSettings,
     sendTestWhatsapp,
   };

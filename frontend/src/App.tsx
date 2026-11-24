@@ -17,13 +17,16 @@ import {
 import type { CameraControlApi } from './OfficeScene';
 import type { MonitorPingFeed } from './pingScreenTexture';
 import TopologyMapModal from './TopologyMapModal';
+import { CustomerLookupPanel, RscBackupVaultPanel } from './SpvToolsTabs';
 import {
   useNocLive,
   type LiveAgentDutyRole,
   type LiveAlertSettings,
+  type LiveCustomerLookupResult,
   type LiveNocSnapshot,
   type LiveOfficeAgent,
   type LiveRouterTelemetry,
+  type LiveRscBackupSummary,
   type LiveTelemetryPoint,
   type NewRouterPayload,
   type RouterConfigPatch,
@@ -120,6 +123,9 @@ export default function App() {
     saveTopologyPositions,
     addAiMemoryFact,
     deleteAiMemoryFact,
+    searchCustomers,
+    runRscBackupNow,
+    fetchRscPreview,
     updateAlertSettings,
     sendTestWhatsapp,
   } = useNocLive();
@@ -690,6 +696,9 @@ export default function App() {
           onSendSummaryWa={sendSpvSummaryWa}
           onAddMemoryFact={addAiMemoryFact}
           onDeleteMemoryFact={deleteAiMemoryFact}
+          onSearchCustomers={searchCustomers}
+          onRunRscBackup={runRscBackupNow}
+          onFetchRscPreview={fetchRscPreview}
           onOpenRouter={(routerId) => {
             setSpvOpen(false);
             cameraApi.current?.focusAgent(routerId);
@@ -1035,6 +1044,40 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {openLiveAgent?.telemetry?.sfpOptics &&
+              openLiveAgent.telemetry.sfpOptics.some((s) => s.health !== 'empty') && (
+                <div className="noc-ifaces">
+                  <h4>🌅 Redaman Optik Modul SFP (Early-Warning dBm)</h4>
+                  <div className="noc-iface-grid">
+                    {openLiveAgent.telemetry.sfpOptics
+                      .filter((s) => s.health !== 'empty')
+                      .map((sfp) => (
+                        <div
+                          key={sfp.name}
+                          className={`noc-iface-pill ${
+                            sfp.health === 'critical' ? 'is-down' : sfp.health === 'warning' ? 'is-drop' : 'is-up'
+                          }`}
+                        >
+                          <strong>
+                            {sfp.name}{' '}
+                            {sfp.health === 'critical'
+                              ? '🚨 KRITIS'
+                              : sfp.health === 'warning'
+                                ? '⚠️ RAWAN'
+                                : '✅ OPTIK OK'}
+                          </strong>
+                          <small>
+                            RX <b>{sfp.rxPowerDbm !== null ? `${sfp.rxPowerDbm} dBm` : 'LOS'}</b> · TX{' '}
+                            {sfp.txPowerDbm !== null ? `${sfp.txPowerDbm} dBm` : '-'}
+                            {sfp.temperatureC !== null ? ` · ${sfp.temperatureC}°C` : ''}
+                            {sfp.vendor ? ` · ${sfp.vendor}` : ''}
+                          </small>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
 
             {openLiveAgent?.telemetry && openLiveAgent.telemetry.interfaces.length > 0 && (
               <div className="noc-ifaces">
@@ -1945,6 +1988,9 @@ function SpvNocCommandModal({
   onSendSummaryWa,
   onAddMemoryFact,
   onDeleteMemoryFact,
+  onSearchCustomers,
+  onRunRscBackup,
+  onFetchRscPreview,
   onOpenRouter,
   onClose,
 }: {
@@ -1955,12 +2001,15 @@ function SpvNocCommandModal({
   onSendSummaryWa: (target?: string) => Promise<string>;
   onAddMemoryFact: (text: string, topic?: string) => Promise<void>;
   onDeleteMemoryFact: (factId: string) => Promise<void>;
+  onSearchCustomers: (query: string) => Promise<LiveCustomerLookupResult>;
+  onRunRscBackup: () => Promise<LiveRscBackupSummary>;
+  onFetchRscPreview: (fileName: string) => Promise<string>;
   onOpenRouter: (routerId: string) => void;
   onClose: () => void;
 }) {
   const spv = snapshot.spvNoc;
   const memory = snapshot.aiMemory;
-  const [tab, setTab] = useState<'chat' | 'reports' | 'memory'>('chat');
+  const [tab, setTab] = useState<'chat' | 'customers' | 'rsc' | 'reports' | 'memory'>('chat');
   const [question, setQuestion] = useState('');
   const [newFactText, setNewFactText] = useState('');
   const [newFactTopic, setNewFactTopic] = useState('SOP & Topologi');
@@ -2059,19 +2108,33 @@ function SpvNocCommandModal({
           </div>
         </div>
 
-        <div className="noc-tabs">
+        <div className="noc-tabs" style={{ flexWrap: 'wrap' }}>
           <button type="button" className={tab === 'chat' ? 'is-active' : ''} onClick={() => setTab('chat')}>
-            🤖 Chat AI SPV NOC ({messages.length})
+            🤖 Chat AI ({messages.length})
+          </button>
+          <button type="button" className={tab === 'customers' ? 'is-active' : ''} onClick={() => setTab('customers')}>
+            🔍 Cek Pelanggan
+          </button>
+          <button type="button" className={tab === 'rsc' ? 'is-active' : ''} onClick={() => setTab('rsc')}>
+            💾 Backup .rsc ({snapshot.rscBackups?.entries.length ?? 0})
           </button>
           <button type="button" className={tab === 'reports' ? 'is-active' : ''} onClick={() => setTab('reports')}>
-            📥 Laporan Agen ({reports.length})
+            📥 Laporan ({reports.length})
           </button>
           <button type="button" className={tab === 'memory' ? 'is-active' : ''} onClick={() => setTab('memory')}>
-            🧠 Memori AI ({memory?.learnedFacts.length ?? 0} fakta · {memory?.totalConversations ?? 0} chat)
+            🧠 Memori AI ({memory?.learnedFacts.length ?? 0})
           </button>
         </div>
 
-        {tab === 'chat' ? (
+        {tab === 'customers' ? (
+          <CustomerLookupPanel onSearch={onSearchCustomers} onOpenRouter={onOpenRouter} />
+        ) : tab === 'rsc' ? (
+          <RscBackupVaultPanel
+            rscBackups={snapshot.rscBackups}
+            onRunBackup={onRunRscBackup}
+            onFetchPreview={onFetchRscPreview}
+          />
+        ) : tab === 'chat' ? (
           <div className="noc-ai-body" style={{ padding: 0 }}>
             <div className="noc-ai-chips">
               <button

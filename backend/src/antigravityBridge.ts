@@ -603,6 +603,16 @@ export async function generateSpvFleetAnswer(options: {
       ping: a.telemetry?.ping ?? null,
       interfacePing: a.telemetry?.interfacePingResult ?? null,
       watchedLinks: a.telemetry?.watchedLinks ?? [],
+      sfpOptics: (a.telemetry?.sfpOptics ?? [])
+        .filter((s) => s.health !== 'empty')
+        .map((s) => ({
+          port: s.name,
+          rxDbm: s.rxPowerDbm,
+          txDbm: s.txPowerDbm,
+          tempC: s.temperatureC,
+          health: s.health,
+          vendor: s.vendor,
+        })),
       radiusTimeoutCount: a.radiusTimeoutCount,
       hotspotFailedLoginCount: a.hotspotFailedLoginCount,
       hotspotFailedUsers: a.hotspotFailedUsers,
@@ -750,6 +760,24 @@ export function buildDeterministicSpvReply(
       ),
     ];
     return `${lines.join('\n')}${memoryFooter()}`;
+  }
+
+  // 1b. SFP Optical RX/TX Power (dBm) question
+  if (!wantsFullFleet && /(sfp|redaman|optik|dbm|laser|transceiver)/i.test(q)) {
+    const sfpLines: string[] = [];
+    for (const a of scope) {
+      const activeSfps = (a.telemetry?.sfpOptics ?? []).filter((s) => s.health !== 'empty');
+      for (const s of activeSfps) {
+        const tag = s.health === 'critical' ? 'KRITIS' : s.health === 'warning' ? 'RAWAN' : 'NORMAL';
+        sfpLines.push(
+          `• [${tag}] ${a.routerConfig.name} -> ${s.name}: RX ${s.rxPowerDbm ?? '-'} dBm · TX ${s.txPowerDbm ?? '-'} dBm${s.temperatureC !== null ? ` · Suhu ${s.temperatureC}°C` : ''}${s.vendor ? ` (${s.vendor})` : ''}`,
+        );
+      }
+    }
+    if (sfpLines.length === 0) {
+      return `🌅 SENSOR REDAMAN SFP OPTIK: Belum ada modul SFP aktif yang melaporkan daya dBm pada router live saat ini.${memoryFooter()}`;
+    }
+    return [`🌅 LAPORAN SPV NOC — REDAMAN MODUL SFP OPTIK (${sfpLines.length} PORT AKTIF):`, ...sfpLines].join('\n') + memoryFooter();
   }
 
   // 2. Mass-Disconnect PPPoE / OLT Cut question

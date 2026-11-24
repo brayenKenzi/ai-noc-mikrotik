@@ -208,6 +208,9 @@ export class TelegramNocBot {
           `• "Cek ping semua router dan 1.1.1.1"`,
           ``,
           `PERINTAH CEPAT:`,
+          `• /cek <nama/ip/mac> — Cek sesi PPPoE/Hotspot pelanggan live`,
+          `• /sfp — Cek redaman optik modul SFP (RX/TX dBm)`,
+          `• /backup_rsc — Backup file .rsc semua MikroTik ke folder mikrotik-rsc/`,
           `• /status — Laporan ringkas semua router live`,
           `• /links — Cek semua link Backbone CRS & vlan2000-CMK`,
           `• /topologi — Cek jalur kabel fiber manual Anda`,
@@ -225,6 +228,10 @@ export class TelegramNocBot {
     let prompt = rawText;
     if (/^\/(status|rekap)\b/i.test(rawText)) {
       prompt = 'SPV NOC, berikan laporan ringkas kondisi semua router live sekarang termasuk CPU, PPPoE, Hotspot, DHCP, link penting, dan Ping.';
+    } else if (/^\/sfp\b/i.test(rawText)) {
+      prompt = 'Cek redaman optik modul SFP (RX/TX dBm dan suhu) di semua router sekarang.';
+    } else if (/^\/backup_rsc\b/i.test(rawText)) {
+      prompt = '/backup_rsc';
     } else if (/^\/links?\b/i.test(rawText)) {
       prompt = 'Cek status seluruh link backbone CRS-BB01..03, suplai ethernet/SFP, serta trafik & ping internet melalui vlan2000-CMK di CORE MONGKONAI sekarang.';
     } else if (/^\/topologi\b/i.test(rawText)) {

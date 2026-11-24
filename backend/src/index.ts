@@ -17,6 +17,7 @@ import { AntigravityBridgeStore } from './antigravityBridge.js';
 import { FonnteWhatsappNotifier } from './fonnteNotifier.js';
 import { TopologyStore } from './topologyStore.js';
 import { AiMemoryStore } from './aiMemoryStore.js';
+import { RscBackupManager } from './rscBackupManager.js';
 import { SyslogUdpServer, parseMikrotikSyslog } from './syslogReceiver.js';
 import type { NocSnapshot } from './types.js';
 
@@ -72,6 +73,7 @@ const AlertSettingsPatchSchema = z.object({
   pingLossCritPct: z.number().int().min(5).max(100).optional(),
   pingConfirmCount: z.number().int().min(1).max(10).optional(),
   pppoeMassDropCount: z.number().int().min(5).max(500).optional(),
+  sfpRxCritDbm: z.number().min(-40).max(-10).optional(),
   alertCooldownSec: z.number().int().min(60).max(86400).optional(),
 });
 
@@ -256,6 +258,13 @@ export async function createNocServer() {
   const aiMemoryStore = new AiMemoryStore(dataDir);
   await aiMemoryStore.init();
 
+  const rscRootDir = process.env.NOC_RSC_DIR ?? path.resolve(dataDir, '../mikrotik-rsc');
+  const rscBackupManager = new RscBackupManager({
+    rscRootDir,
+    appDataDir: dataDir,
+  });
+  await rscBackupManager.init();
+
   const fonnteNotifier = new FonnteWhatsappNotifier(
     dataDir,
     process.env.FONNTE_TOKEN ?? '',
@@ -297,6 +306,7 @@ export async function createNocServer() {
     fonnteNotifier,
     topologyStore,
     aiMemoryStore,
+    rscBackupManager,
     externalPingTargets,
   });
 
@@ -674,6 +684,56 @@ export async function createNocServer() {
       const message = err instanceof Error ? err.message : 'Gagal menghapus memori AI';
       res.status(400).json({ success: false, error: message });
     }
+  });
+
+  // --- Instant Customer Lookup (PPPoE & Hotspot across all live routers) ---
+  app.get('/api/customers/search', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const rawQ = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      if (rawQ.length < 2 || rawQ.length > 64) {
+        res.status(400).json({ success: false, error: 'Masukkan minimal 2 karakter (nama user, IP, atau MAC)' });
+        return;
+      }
+      const result = await orchestrator.lookupCustomer(rawQ);
+      res.json({ success: true, data: result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mencari sesi pelanggan';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  // --- MikroTik .rsc Auto-Backup Vault (Stored in separate mikrotik-rsc/ folder) ---
+  app.post('/api/backups/rsc/run', writeLimiter, requireAdmin, async (_req, res) => {
+    try {
+      const summary = await orchestrator.runRscBackupNow();
+      res.json({
+        success: true,
+        data: { summary, snapshot: orchestrator.buildSnapshot() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menjalankan backup .rsc';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.get('/api/backups/rsc/files/:fileName', requireAdmin, async (req, res) => {
+    const fileName = String(req.params.fileName ?? '').trim();
+    if (!/^[a-zA-Z0-9._-]+\.rsc$/.test(fileName)) {
+      res.status(400).json({ success: false, error: 'Nama file .rsc tidak valid' });
+      return;
+    }
+    const content = await orchestrator.readRscFileContent(fileName);
+    if (content === null) {
+      res.status(404).json({ success: false, error: 'File .rsc belum tersedia' });
+      return;
+    }
+    if (req.query.download === '1') {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.send(content);
+      return;
+    }
+    res.json({ success: true, data: { fileName, content } });
   });
 
   app.post('/api/agents/:id/ask', writeLimiter, requireAdmin, async (req, res) => {

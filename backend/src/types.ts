@@ -195,6 +195,65 @@ export interface PingMetric {
   readonly updatedAt: string;
 }
 
+export interface SfpOpticalMetric {
+  readonly name: string;
+  readonly modulePresent: boolean;
+  readonly linkOk: boolean;
+  readonly rxPowerDbm: number | null;
+  readonly txPowerDbm: number | null;
+  readonly temperatureC: number | null;
+  readonly wavelengthNm: number | null;
+  readonly vendor: string;
+  readonly health: 'ok' | 'warning' | 'critical' | 'empty';
+}
+
+export interface CustomerSessionMatch {
+  readonly type: 'pppoe' | 'hotspot';
+  readonly routerId: string;
+  readonly routerName: string;
+  readonly username: string;
+  readonly address: string;
+  readonly macOrCallerId: string;
+  readonly uptime: string;
+  readonly serviceOrServer: string;
+  readonly rxMbps: number | null;
+  readonly txMbps: number | null;
+  readonly totalRxMb: number | null;
+  readonly totalTxMb: number | null;
+  readonly viaRadius: boolean;
+}
+
+export interface CustomerLookupResult {
+  readonly query: string;
+  readonly searchedRouters: number;
+  readonly matches: readonly CustomerSessionMatch[];
+  readonly relatedLogs: readonly SyslogEntry[];
+  readonly checkedAt: string;
+}
+
+export interface RscBackupEntry {
+  readonly routerId: string;
+  readonly routerName: string;
+  readonly fileName: string;
+  readonly folderPath: string;
+  readonly lastBackupAt: string;
+  readonly sizeBytes: number;
+  readonly lineCount: number;
+  readonly addedLines: number;
+  readonly removedLines: number;
+  readonly diffPreview: readonly string[];
+  readonly status: 'ok' | 'unchanged' | 'error';
+  readonly error?: string;
+}
+
+export interface RscBackupSummary {
+  readonly folderName: string;
+  readonly lastRunAt: string | null;
+  readonly lastGitSyncAt: string | null;
+  readonly lastGitSyncStatus: string;
+  readonly entries: readonly RscBackupEntry[];
+}
+
 export interface AlertSettings {
   readonly waEnabled: boolean;
   readonly waTarget: string;
@@ -207,6 +266,7 @@ export interface AlertSettings {
   readonly pingLossCritPct: number;
   readonly pingConfirmCount: number;
   readonly pppoeMassDropCount?: number;
+  readonly sfpRxCritDbm?: number;
   readonly alertCooldownSec: number;
 }
 
@@ -228,6 +288,7 @@ export interface RouterTelemetry {
   readonly bgpPeersEstablished: number;
   readonly bgpPeersTotal: number;
   readonly interfaces: readonly InterfaceMetric[];
+  readonly sfpOptics?: readonly SfpOpticalMetric[];
   readonly ping?: PingMetric | null;
   readonly interfacePingResult?: PingMetric | null;
   readonly watchedLinks?: readonly WatchedLinkStatus[];
@@ -303,7 +364,7 @@ export interface SpvReportEntry {
   readonly routerName: string;
   readonly agentName: string;
   readonly severity: 'info' | 'warning' | 'critical';
-  readonly category: 'ping' | 'radius' | 'offline' | 'resource' | 'hotspot' | 'link' | 'pppoe_mass' | 'recovery';
+  readonly category: 'ping' | 'radius' | 'offline' | 'resource' | 'hotspot' | 'link' | 'pppoe_mass' | 'sfp' | 'recovery';
   readonly message: string;
   readonly sentToWa: boolean;
 }
@@ -355,6 +416,7 @@ export interface NocSnapshot {
   readonly topologyLinks: readonly LiveTopologyLink[];
   readonly topologyPositions: readonly TopologyNodePosition[];
   readonly aiMemory: AiMemorySummary;
+  readonly rscBackups?: RscBackupSummary;
   readonly approvals: readonly ApprovalTicket[];
   readonly globalLogs: readonly SyslogEntry[];
   readonly radiusAlerts: readonly RadiusTimeoutAlert[];

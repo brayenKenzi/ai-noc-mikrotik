@@ -25,9 +25,23 @@ import {
 } from './poller.js';
 import { LinkWatchdogEngine, resolveRouterDutyProfile } from './linkWatchdog.js';
 import { PppoeMassDisconnectWatchdog } from './pppoeWatchdog.js';
+import { SfpOpticalWatchdog } from './sfpMonitor.js';
+import {
+  extractCustomerLookupQuery,
+  formatCustomerLookupPlainText,
+  searchCustomersAcrossFleet,
+} from './customerLookup.js';
+import type { RscBackupManager } from './rscBackupManager.js';
 import type { NewTopologyLinkInput, TopologyStore } from './topologyStore.js';
 import type { AiMemoryStore } from './aiMemoryStore.js';
-import type { AiLearnedFact, TopologyLink, TopologyNodePosition } from './types.js';
+import type {
+  AiLearnedFact,
+  CustomerLookupResult,
+  RscBackupSummary,
+  SfpOpticalMetric,
+  TopologyLink,
+  TopologyNodePosition,
+} from './types.js';
 import {
   isAnomalySyslog,
   isRadiusTimeoutMessage,
@@ -95,6 +109,8 @@ export class NocOrchestrator {
   private readonly interfacePingMap = new Map<string, PingMetric>();
   private readonly linkWatchdog = new LinkWatchdogEngine();
   private readonly pppoeWatchdog = new PppoeMassDisconnectWatchdog();
+  private readonly sfpWatchdog = new SfpOpticalWatchdog();
+  private readonly sfpOpticsMap = new Map<string, readonly SfpOpticalMetric[]>();
   private pingSweepTick = 0;
   private externalPings: readonly PingMetric[] = [];
   private readonly historyMap = new Map<string, readonly TelemetryPoint[]>();
@@ -113,6 +129,7 @@ export class NocOrchestrator {
   private readonly fonnteNotifier?: FonnteWhatsappNotifier;
   private readonly topologyStore?: TopologyStore;
   private readonly aiMemoryStore?: AiMemoryStore;
+  private readonly rscBackupManager?: RscBackupManager;
   private readonly externalPingTargets: readonly string[];
   private readonly nocServerIp: string;
   private readonly onBroadcast: (snapshot: NocSnapshot) => void;
@@ -122,6 +139,7 @@ export class NocOrchestrator {
   private pollTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private dailyReportTimer: NodeJS.Timeout | null = null;
+  private rscInitTimer: NodeJS.Timeout | null = null;
   private polling = false;
   private pinging = false;
 
@@ -138,6 +156,7 @@ export class NocOrchestrator {
     readonly fonnteNotifier?: FonnteWhatsappNotifier;
     readonly topologyStore?: TopologyStore;
     readonly aiMemoryStore?: AiMemoryStore;
+    readonly rscBackupManager?: RscBackupManager;
     readonly externalPingTargets?: readonly string[];
   }) {
     this.routers = options.routers;
@@ -150,6 +169,7 @@ export class NocOrchestrator {
     this.fonnteNotifier = options.fonnteNotifier;
     this.topologyStore = options.topologyStore;
     this.aiMemoryStore = options.aiMemoryStore;
+    this.rscBackupManager = options.rscBackupManager;
     this.externalPingTargets =
       options.externalPingTargets && options.externalPingTargets.length > 0
         ? options.externalPingTargets
@@ -204,11 +224,85 @@ export class NocOrchestrator {
     return result;
   }
 
+  async lookupCustomer(query: string): Promise<CustomerLookupResult> {
+    const reachableIds = new Set<string>();
+    for (const [id, tel] of this.telemetryMap.entries()) {
+      if (tel.reachable) reachableIds.add(id);
+    }
+    return searchCustomersAcrossFleet({
+      query,
+      routers: this.routers,
+      resolveSecret: (r) => this.resolveReadSecret(r) ?? '',
+      pool: sharedRouterOsPool,
+      logsByRouter: this.logsMap,
+      ...(reachableIds.size > 0 ? { reachableRouterIds: reachableIds } : {}),
+    });
+  }
+
+  async runRscBackupNow(): Promise<RscBackupSummary> {
+    if (!this.rscBackupManager) {
+      throw new Error('Manajer backup .rsc belum diaktifkan');
+    }
+    const summary = await this.rscBackupManager.backupAllRouters({
+      routers: this.routers,
+      resolveSecret: (r) => this.resolveReadSecret(r) ?? '',
+      pool: sharedRouterOsPool,
+      syncGit: true,
+    });
+    this.broadcast();
+    return summary;
+  }
+
+  async readRscFileContent(fileName: string): Promise<string | null> {
+    if (!this.rscBackupManager) return null;
+    return this.rscBackupManager.readRouterRscContent(fileName);
+  }
+
   async askSpvNoc(
     question: string,
     focusRouterId?: string,
     userSource = 'Boss / Admin',
   ): Promise<{ readonly reply: string; readonly source: string }> {
+    // 1. Instant /backup_rsc trigger from Telegram or Web chat
+    if (/^\/backup_rsc\b/i.test(question.trim()) && this.rscBackupManager) {
+      const summary = await this.runRscBackupNow();
+      const okCount = summary.entries.filter((e) => e.status !== 'error').length;
+      const lines = [
+        `💾 BACKUP KONFIGURASI MIKROTIK (.RSC) SELESAI!`,
+        `Folder Terpisah: ${summary.folderName}/latest/ & ${summary.folderName}/history/`,
+        `Berhasil: ${okCount}/${summary.entries.length} router live`,
+        `Status Git Private: ${summary.lastGitSyncStatus}`,
+        '',
+        ...summary.entries.map((e) =>
+          e.status === 'error'
+            ? `• [GAGAL] ${e.routerName}: ${e.error ?? 'Unreachable'}`
+            : `• [OK] ${e.routerName} -> ${e.folderPath} (${e.lineCount} baris${e.addedLines > 0 || e.removedLines > 0 ? `, +${e.addedLines}/-${e.removedLines} berubah` : ', tidak berubah'})`,
+        ),
+      ];
+      const result = { reply: lines.join('\n'), source: 'SPV NOC · RSC Vault' };
+      if (this.aiBridge) {
+        await this.aiBridge.appendConversation('spv-noc', question, result.reply, result.source, userSource);
+      }
+      this.broadcast();
+      return result;
+    }
+
+    // 2. Instant live customer lookup (/cek <user/ip/mac> or "cek pelanggan <nama>")
+    const customerQuery = extractCustomerLookupQuery(question);
+    if (customerQuery) {
+      const lookup = await this.lookupCustomer(customerQuery);
+      const reply = formatCustomerLookupPlainText(lookup);
+      const result = { reply, source: 'SPV NOC · Live Customer Scanner' };
+      if (this.aiBridge) {
+        await this.aiBridge.appendConversation('spv-noc', question, result.reply, result.source, userSource);
+      }
+      if (this.aiMemoryStore) {
+        await this.aiMemoryStore.recordConversation(userSource, question, result.reply, result.source);
+      }
+      this.broadcast();
+      return result;
+    }
+
     const snapshot = this.buildSnapshot();
     const pending = this.approvalStore.getAll().filter((a) => a.status === 'PENDING');
     const memoryContext = this.aiMemoryStore?.retrieveRelevantContext(question);
@@ -544,10 +638,20 @@ export class NocOrchestrator {
       void this.runPingSweep();
     }, pingIntervalMs);
 
-    // Check every 60s for 1x Daily Scheduled WhatsApp Report (never duplicates on same date)
+    // Check every 60s for 1x Daily Scheduled WhatsApp Report & 02:00 Daily MikroTik .rsc Backup
     this.dailyReportTimer = setInterval(() => {
       void this.checkAndSendDailyReport();
+      if (this.rscBackupManager?.shouldRunDailyBackup(new Date(), 2)) {
+        void this.runRscBackupNow();
+      }
     }, 60_000);
+
+    // Seed initial MikroTik .rsc folder 15s after startup if no backup exists yet
+    if (this.rscBackupManager && this.rscBackupManager.getSummary().entries.length === 0) {
+      this.rscInitTimer = setTimeout(() => {
+        void this.runRscBackupNow();
+      }, 15_000);
+    }
   }
 
   stop(): void {
@@ -562,6 +666,10 @@ export class NocOrchestrator {
     if (this.dailyReportTimer) {
       clearInterval(this.dailyReportTimer);
       this.dailyReportTimer = null;
+    }
+    if (this.rscInitTimer) {
+      clearTimeout(this.rscInitTimer);
+      this.rscInitTimer = null;
     }
     sharedRouterOsPool.closeAll();
     this.telegramBot.stop();
@@ -999,7 +1107,7 @@ export class NocOrchestrator {
                 `DETAIL: ${massEvent.message}`,
                 `Waktu: ${new Date().toLocaleString('id-ID')}`,
               ].join('\n');
-              const sentRecMass = await this.fonnteNotifier.sendRecoveryIfActive(massEvent.key, recMassMsg);
+                const sentRecMass = await this.fonnteNotifier.sendRecoveryIfActive(massEvent.key, recMassMsg);
               if (sentRecMass) {
                 void this.telegramBot.sendPlainAlert(recMassMsg);
                 this.recordSpvReport({
@@ -1011,6 +1119,66 @@ export class NocOrchestrator {
                   message: massEvent.message,
                   sentToWa: true,
                 });
+              }
+            }
+
+            // Evaluate SFP Optical RX/TX Power Watchdog (dBm Early Warning before Fiber Cut!)
+            if (tel.sfpOptics && tel.sfpOptics.length > 0) {
+              const sfpCritDbm = this.fonnteNotifier.getSettings().sfpRxCritDbm ?? -24;
+              const { updatedOptics, events: sfpEvents } = this.sfpWatchdog.evaluate(
+                router,
+                tel.sfpOptics,
+                sfpCritDbm,
+                confirmNeeded,
+              );
+              this.sfpOpticsMap.set(router.id, updatedOptics);
+
+              for (const sev of sfpEvents) {
+                if (sev.kind === 'high_attenuation' || sev.kind === 'los') {
+                  const sfpMsg = [
+                    sev.kind === 'los'
+                      ? `🚨 KRITIS SPV NOC — MODUL SFP LOS (HILANG SINYAL OPTIK)`
+                      : `🌅 EARLY WARNING SPV NOC — REDAMAN OPTIK SFP KRITIS`,
+                    `DILAPORKAN OLEH: ${router.agentName}`,
+                    `ROUTER: ${router.name} (${router.host})`,
+                    `DETAIL: ${sev.message}`,
+                    `SARAN: Bersihkan konektor patchcord/adapter FO atau cek tekukan kabel sebelum link putus total.`,
+                    `Waktu: ${new Date().toLocaleString('id-ID')}`,
+                  ].join('\n');
+                  const sentSfp = await this.fonnteNotifier.sendAlertWithCooldown(sev.key, sfpMsg);
+                  if (sentSfp) {
+                    void this.telegramBot.sendPlainAlert(sfpMsg);
+                    this.recordSpvReport({
+                      routerId: router.id,
+                      routerName: router.name,
+                      agentName: router.agentName,
+                      severity: 'critical',
+                      category: 'sfp',
+                      message: sev.message,
+                      sentToWa: true,
+                    });
+                  }
+                } else if (sev.kind === 'recovered') {
+                  const recSfpMsg = [
+                    `✅ PULIH SPV NOC — REDAMAN OPTIK SFP NORMAL`,
+                    `ROUTER: ${router.name} (${router.host})`,
+                    `DETAIL: ${sev.message}`,
+                    `Waktu: ${new Date().toLocaleString('id-ID')}`,
+                  ].join('\n');
+                  const sentRecSfp = await this.fonnteNotifier.sendRecoveryIfActive(sev.key, recSfpMsg);
+                  if (sentRecSfp) {
+                    void this.telegramBot.sendPlainAlert(recSfpMsg);
+                    this.recordSpvReport({
+                      routerId: router.id,
+                      routerName: router.name,
+                      agentName: router.agentName,
+                      severity: 'info',
+                      category: 'recovery',
+                      message: sev.message,
+                      sentToWa: true,
+                    });
+                  }
+                }
               }
             }
           }
@@ -1176,8 +1344,9 @@ export class NocOrchestrator {
       const interfacePingResult = this.interfacePingMap.get(r.id) ?? null;
       const watchedLinks = this.linkWatchdog.getWatchedStatus(r.id);
       const pppoeDrop = this.pppoeWatchdog.getStatus(r.id);
+      const sfpOptics = this.sfpOpticsMap.get(r.id) ?? baseTel?.sfpOptics;
       const tel: RouterTelemetry | null = baseTel
-        ? { ...baseTel, ping, interfacePingResult, watchedLinks, pppoeDrop }
+        ? { ...baseTel, ping, interfacePingResult, watchedLinks, pppoeDrop, ...(sfpOptics ? { sfpOptics } : {}) }
         : null;
       const duty = resolveRouterDutyProfile(r);
       const history = this.historyMap.get(r.id) ?? [];
@@ -1222,6 +1391,17 @@ export class NocOrchestrator {
           mendesak.push(`🔌 LINK ${wl.name} DOWN / PUTUS!`);
         } else if (wl.state === 'drop') {
           mendesak.push(`📉 TRAFIK ${wl.name} DROP ${wl.dropPercent}% (${wl.totalMbps} vs ${wl.baselineMbps} Mbps)`);
+        }
+      }
+      for (const sfp of sfpOptics ?? []) {
+        if (sfp.health === 'critical') {
+          mendesak.push(
+            `🌅 REDAMAN SFP KRITIS (${sfp.name}): RX ${sfp.rxPowerDbm ?? 'LOS'} dBm${sfp.temperatureC !== null ? ` · ${sfp.temperatureC}°C` : ''}`,
+          );
+        } else if (sfp.health === 'warning') {
+          mendesak.push(
+            `⚠️ REDAMAN SFP MULAI TINGGI (${sfp.name}): RX ${sfp.rxPowerDbm} dBm`,
+          );
         }
       }
       if (interfacePingResult && (interfacePingResult.status === 'critical' || interfacePingResult.status === 'down')) {
@@ -1388,6 +1568,7 @@ export class NocOrchestrator {
       topologyLinks,
       topologyPositions,
       aiMemory,
+      ...(this.rscBackupManager ? { rscBackups: this.rscBackupManager.getSummary() } : {}),
       approvals: allApprovals.slice(0, 60),
       globalLogs: this.globalLogs.slice(0, 80),
       radiusAlerts,

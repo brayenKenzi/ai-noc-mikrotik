@@ -19,6 +19,7 @@ const DEFAULT_ALERT_SETTINGS: AlertSettings = {
   extPingCritMs: 150,
   pingLossCritPct: 40,
   pingConfirmCount: 3,
+  sfpRxCritDbm: -24,
   alertCooldownSec: 1800, // 30 minutes anti-spam cooldown for repeated critical alerts
 };
 

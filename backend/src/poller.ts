@@ -2,7 +2,16 @@ import { RouterOsClient, RouterOsSessionPool, type RouterOsCommandOutcome } from
 import { isRadiusTimeoutMessage, parseHotspotFailedLogin } from './syslogReceiver.js';
 import { parseRouterOsPingRows, type PingThresholds } from './pingMonitor.js';
 import { resolveRouterDutyProfile } from './linkWatchdog.js';
-import type { InterfaceMetric, PingMetric, RouterDevice, RouterHealthStatus, RouterTelemetry, SyslogEntry } from './types.js';
+import { pollRouterSfpOptics } from './sfpMonitor.js';
+import type {
+  InterfaceMetric,
+  PingMetric,
+  RouterDevice,
+  RouterHealthStatus,
+  RouterTelemetry,
+  SfpOpticalMetric,
+  SyslogEntry,
+} from './types.js';
 
 interface CounterSample {
   readonly rxByte: number;
@@ -16,6 +25,7 @@ interface RouterPollCache {
   voltageV: number | null;
   bgpPeersEstablished: number;
   bgpPeersTotal: number;
+  sfpOptics: readonly SfpOpticalMetric[];
 }
 
 const interfaceCounterCache = new Map<string, CounterSample>();
@@ -305,6 +315,7 @@ export async function pollRouterWithLogs(
     let voltageV = prevCache?.voltageV ?? null;
     let bgpPeersEstablished = prevCache?.bgpPeersEstablished ?? 0;
     let bgpPeersTotal = prevCache?.bgpPeersTotal ?? 0;
+    let sfpOptics: readonly SfpOpticalMetric[] = prevCache?.sfpOptics ?? [];
 
     if (includeSecondary) {
       const health = parseSystemHealth(healthOut?.ok ? healthOut.rows : []);
@@ -315,12 +326,23 @@ export async function pollRouterWithLogs(
       bgpPeersTotal = bgp.total;
     }
 
+    // Poll SFP optical RX/TX dBm on first poll and every 10th tick (~30s) via persistent session
+    const includeSfp = !oneShotTest && (!prevCache || tick % 10 === 1);
+    if (includeSfp) {
+      try {
+        sfpOptics = await pollRouterSfpOptics(sharedRouterOsPool, router, connOpts, rawInterfaces);
+      } catch {
+        // Keep previous cached SFP readings if monitor command fails transiently
+      }
+    }
+
     secondaryPollCache.set(router.id, {
       tick,
       temperatureC,
       voltageV,
       bgpPeersEstablished,
       bgpPeersTotal,
+      sfpOptics,
     });
 
     const apiLogs = includeSecondary && logOut?.ok ? parseRouterApiLogs(router, logOut.rows) : [];
@@ -344,6 +366,7 @@ export async function pollRouterWithLogs(
         bgpPeersEstablished,
         bgpPeersTotal,
         interfaces,
+        sfpOptics,
         status: computeHealthStatus(true, cpuLoadPercent, memoryUsedPercent, temperatureC),
       },
       apiLogs,
