@@ -1,7 +1,78 @@
 export type RouterRole = 'core' | 'bras' | 'branch';
 export type AgentRoom = 'core' | 'distribusi' | 'security';
+export type AgentDutyRole = 'backbone_master' | 'link_guard' | 'core_vlan_watchdog' | 'bras_gateway' | 'branch_dist';
 export type RouterHealthStatus = 'healthy' | 'warning' | 'critical' | 'offline';
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXECUTED' | 'FAILED' | 'EXPIRED';
+
+export interface InterfacePingConfig {
+  readonly interfaceName: string;
+  readonly target: string;
+  readonly warnMs?: number;
+  readonly critMs?: number;
+}
+
+export type FiberLinkType = 'backbone' | 'vlan' | 'olt' | 'backup';
+
+export interface TopologyLink {
+  readonly id: string;
+  readonly fromRouterId: string;
+  readonly fromInterface: string;
+  readonly toRouterId: string;
+  readonly toInterface: string;
+  readonly label: string;
+  readonly fiberType: FiberLinkType;
+  readonly color?: string;
+}
+
+export interface LiveTopologyLink extends TopologyLink {
+  readonly fromRouterName: string;
+  readonly toRouterName: string;
+  readonly status: 'ok' | 'degraded' | 'down';
+  readonly liveMbps: number;
+  readonly statusReason: string;
+}
+
+export interface TopologyNodePosition {
+  readonly routerId: string;
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface AiLearnedFact {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly source: string;
+  readonly topic: string;
+  readonly text: string;
+}
+
+export interface AiMemorySummary {
+  readonly totalConversations: number;
+  readonly learnedFacts: readonly AiLearnedFact[];
+}
+
+export interface PppoeDropStatus {
+  readonly routerId: string;
+  readonly previousPeak: number;
+  readonly currentCount: number;
+  readonly droppedCount: number;
+  readonly droppedPercent: number;
+  readonly suspectedOltInterfaces: readonly string[];
+  readonly activeIncident: boolean;
+  readonly detectedAt: string;
+}
+
+export interface WatchedLinkStatus {
+  readonly name: string;
+  readonly running: boolean;
+  readonly disabled: boolean;
+  readonly rxMbps: number;
+  readonly txMbps: number;
+  readonly totalMbps: number;
+  readonly baselineMbps: number;
+  readonly dropPercent: number;
+  readonly state: 'ok' | 'drop' | 'down';
+}
 
 export type PlaybookActionType =
   | 'ADD_FIREWALL_BLOCKLIST'
@@ -20,6 +91,13 @@ export interface RouterDevice {
   readonly routerOsVersion: 'v6' | 'v7';
   readonly role: RouterRole;
   readonly agentName: string;
+  readonly dutyRole?: AgentDutyRole;
+  readonly dutyLabel?: string;
+  readonly watchedInterfaces?: readonly string[];
+  readonly trafficDropThresholdPct?: number;
+  readonly minTrafficMbps?: number;
+  readonly interfacePing?: InterfacePingConfig | null;
+  readonly customPrompt?: string;
   readonly agentColor: string;
   readonly room: AgentRoom;
   readonly deskX: number;
@@ -36,6 +114,14 @@ export interface RouterDevice {
 export interface RouterPublicConfig {
   readonly id: string;
   readonly name: string;
+  readonly agentName: string;
+  readonly dutyRole: AgentDutyRole;
+  readonly dutyLabel: string;
+  readonly watchedInterfaces: readonly string[];
+  readonly trafficDropThresholdPct: number;
+  readonly minTrafficMbps: number;
+  readonly interfacePing: InterfacePingConfig | null;
+  readonly customPrompt: string;
   readonly deviceModel: string;
   readonly host: string;
   readonly port: number;
@@ -44,11 +130,20 @@ export interface RouterPublicConfig {
   readonly role: RouterRole;
   readonly readUsername: string;
   readonly hasCustomReadPassword: boolean;
+  readonly writeExecutionReady?: boolean;
   readonly simulated: boolean;
 }
 
 export interface RouterUpdatePatch {
   readonly name?: string;
+  readonly agentName?: string;
+  readonly dutyRole?: AgentDutyRole;
+  readonly dutyLabel?: string;
+  readonly watchedInterfaces?: readonly string[];
+  readonly trafficDropThresholdPct?: number;
+  readonly minTrafficMbps?: number;
+  readonly interfacePing?: InterfacePingConfig | null;
+  readonly customPrompt?: string;
   readonly host?: string;
   readonly port?: number;
   readonly useTls?: boolean;
@@ -89,6 +184,32 @@ export interface TelemetryPoint {
   readonly reachable: boolean;
 }
 
+export interface PingMetric {
+  readonly target: string;
+  readonly label: string;
+  readonly minMs: number | null;
+  readonly avgMs: number | null;
+  readonly maxMs: number | null;
+  readonly packetLossPercent: number;
+  readonly status: 'ok' | 'high' | 'critical' | 'down';
+  readonly updatedAt: string;
+}
+
+export interface AlertSettings {
+  readonly waEnabled: boolean;
+  readonly waTarget: string;
+  readonly dailyReportEnabled: boolean;
+  readonly dailyReportHour: number;
+  readonly lastDailyReportDate?: string;
+  readonly pingWarnMs: number;
+  readonly pingCritMs: number;
+  readonly extPingCritMs: number;
+  readonly pingLossCritPct: number;
+  readonly pingConfirmCount: number;
+  readonly pppoeMassDropCount?: number;
+  readonly alertCooldownSec: number;
+}
+
 export interface RouterTelemetry {
   readonly routerId: string;
   readonly timestamp: string;
@@ -101,9 +222,16 @@ export interface RouterTelemetry {
   readonly temperatureC: number | null;
   readonly voltageV: number | null;
   readonly activePppoeCount: number;
+  readonly activeHotspotCount: number;
+  readonly hotspotHostCount: number;
+  readonly dhcpLeaseCount: number;
   readonly bgpPeersEstablished: number;
   readonly bgpPeersTotal: number;
   readonly interfaces: readonly InterfaceMetric[];
+  readonly ping?: PingMetric | null;
+  readonly interfacePingResult?: PingMetric | null;
+  readonly watchedLinks?: readonly WatchedLinkStatus[];
+  readonly pppoeDrop?: PppoeDropStatus | null;
   readonly status: RouterHealthStatus;
   readonly lastError?: string;
 }
@@ -168,6 +296,32 @@ export interface AiBridgeState {
   readonly messages: readonly AiChatMessage[];
 }
 
+export interface SpvReportEntry {
+  readonly id: string;
+  readonly timestamp: string;
+  readonly routerId: string;
+  readonly routerName: string;
+  readonly agentName: string;
+  readonly severity: 'info' | 'warning' | 'critical';
+  readonly category: 'ping' | 'radius' | 'offline' | 'resource' | 'hotspot' | 'link' | 'pppoe_mass' | 'recovery';
+  readonly message: string;
+  readonly sentToWa: boolean;
+}
+
+export interface SpvNocState {
+  readonly id: 'spv-noc';
+  readonly name: string;
+  readonly role: string;
+  readonly linked: boolean;
+  readonly modelLabel: string;
+  readonly lastHeartbeatAt: string;
+  readonly totalRouters: number;
+  readonly liveRouters: number;
+  readonly activeAlerts: number;
+  readonly reports: readonly SpvReportEntry[];
+  readonly messages: readonly AiChatMessage[];
+}
+
 export interface OfficeAgentView {
   readonly key: string;
   readonly routerId: string;
@@ -189,14 +343,22 @@ export interface OfficeAgentView {
   readonly recentLogs: readonly SyslogEntry[];
   readonly pendingApprovals: readonly ApprovalTicket[];
   readonly radiusTimeoutCount: number;
+  readonly hotspotFailedLoginCount: number;
+  readonly hotspotFailedUsers: readonly string[];
   readonly aiBridge?: AiBridgeState;
 }
 
 export interface NocSnapshot {
   readonly updatedAt: string;
+  readonly spvNoc: SpvNocState;
   readonly agents: readonly OfficeAgentView[];
+  readonly topologyLinks: readonly LiveTopologyLink[];
+  readonly topologyPositions: readonly TopologyNodePosition[];
+  readonly aiMemory: AiMemorySummary;
   readonly approvals: readonly ApprovalTicket[];
   readonly globalLogs: readonly SyslogEntry[];
   readonly radiusAlerts: readonly RadiusTimeoutAlert[];
+  readonly externalPings: readonly PingMetric[];
+  readonly alertSettings?: AlertSettings & { readonly waTokenConfigured: boolean };
   readonly globalMetrics: readonly { readonly label: string; readonly nilai: string }[];
 }

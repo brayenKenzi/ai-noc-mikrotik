@@ -15,8 +15,13 @@ import {
   type IdleSpot,
 } from './office';
 import type { CameraControlApi } from './OfficeScene';
+import type { MonitorPingFeed } from './pingScreenTexture';
+import TopologyMapModal from './TopologyMapModal';
 import {
   useNocLive,
+  type LiveAgentDutyRole,
+  type LiveAlertSettings,
+  type LiveNocSnapshot,
   type LiveOfficeAgent,
   type LiveRouterTelemetry,
   type LiveTelemetryPoint,
@@ -25,6 +30,19 @@ import {
 } from './nocLive';
 
 const OfficeScene = lazy(() => import('./OfficeScene'));
+
+// Open-concept Cafe Datacenter seating layout (ensures zero overlap with central SPV NOC desk at 0, 0.55)
+const CAFE_SEAT_COORDS: Record<string, readonly [number, number]> = {
+  'crs-backbone-01': [-5.3, -1.75],
+  'crs-backbone-02': [-3.3, -1.75],
+  'core-mongkonai': [-4.35, -0.15],
+  'crs-backbone-03': [-5.3, 1.45],
+  'crs-backbone-04': [-3.3, 1.45],
+  'ccr-momonet-pusat': [0.0, -1.75],
+  'rb750-qairen': [3.3, -1.65],
+  'rb750-dn-bangomolunow': [5.2, -1.65],
+  'rb750-dn-lolan': [4.25, 0.35],
+};
 
 const HARI = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 const BULAN = [
@@ -48,15 +66,29 @@ export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [t, setT] = useState(0);
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [spvOpen, setSpvOpen] = useState(false);
+  const [topoOpen, setTopoOpen] = useState(false);
+  const [spvQuickPrompt, setSpvQuickPrompt] = useState<{ text: string; focusRouterId?: string } | null>(null);
   const [fleetOpen, setFleetOpen] = useState(false);
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditTab, setAuditTab] = useState<'approvals' | 'logs'>('logs');
   const [accountOpen, setAccountOpen] = useState(false);
   const [autoTour, setAutoTour] = useState(false);
+  const [copiedCmdId, setCopiedCmdId] = useState<string | null>(null);
   const [miniExpanded, setMiniExpanded] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth > 767 : true,
   );
+
+  const copyCliCommand = async (id: string, command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopiedCmdId(id);
+      window.setTimeout(() => setCopiedCmdId((prev) => (prev === id ? null : prev)), 2200);
+    } catch {
+      /* clipboard tidak tersedia */
+    }
+  };
 
   const drive = useRef<((t: number) => void) | null>(null);
   const cameraApi = useRef<CameraControlApi | null>(null);
@@ -74,13 +106,22 @@ export default function App() {
     busyTicketId,
     pollingNow,
     pollNow,
+    pingNow,
     decideApproval,
     simulateIncident,
     addRouter,
     deleteRouter,
     updateRouterConfig,
     testRouterConnection,
-    askAgentAi,
+    askSpvNoc,
+    sendSpvSummaryWa,
+    addTopologyLink,
+    deleteTopologyLink,
+    saveTopologyPositions,
+    addAiMemoryFact,
+    deleteAiMemoryFact,
+    updateAlertSettings,
+    sendTestWhatsapp,
   } = useNocLive();
 
   const [gaya, setGaya] = useState<GayaId>(() => {
@@ -135,26 +176,79 @@ export default function App() {
   const time = lapse?.time ?? p.time ?? hm(now);
 
   const desks: DeskState[] = useMemo(() => {
+    const spvState = snapshot?.spvNoc;
+    const spvAlerts = spvState?.activeAlerts ?? 0;
+    const spvDesk: DeskState = {
+      desk: { key: 'spv-noc', room: 'security', color: '#fbbf24', x: 0.0, z: 0.55 },
+      agen: {
+        key: 'spv-noc',
+        nama: '👑 SPV NOC',
+        tugas: 'AI Supervisor · Semua MikroTik & WA Fonnte',
+        ruang: 'security',
+        warna: '#fbbf24',
+        x: 0.0,
+        z: 0.55,
+      },
+      doing: {
+        activity: spvAlerts > 0 ? 'laporan' : 'kerja',
+        label: spvAlerts > 0 ? `🚨 ${spvAlerts} anomali` : `👑 AI · ${spvState?.liveRouters ?? 0} live`,
+      },
+      bubble:
+        spvState?.reports[0]?.message ??
+        `Mengawasi ${spvState?.totalRouters ?? 9} router & siap lapor anomali via WA Fonnte.`,
+      waiting: [],
+      urgent: spvAlerts > 0 ? [`${spvAlerts} anomali aktif di jaringan`] : [],
+    };
+
     if (snapshot && snapshot.agents.length > 0 && !p.lapse) {
-      return snapshot.agents.map((ag) => ({
-        desk: { key: ag.key, room: ag.ruang, color: ag.warna, x: ag.x, z: ag.z },
-        agen: {
-          key: ag.key,
-          nama: ag.nama,
-          tugas: ag.tugas,
-          ruang: ag.ruang,
-          warna: ag.warna,
-          x: ag.x,
-          z: ag.z,
-        },
-        doing: { activity: ag.activity, label: ag.activityLabel },
-        bubble: ag.ringkasan.length <= 115 ? ag.ringkasan : `${ag.ringkasan.slice(0, 112)}…`,
-        waiting: ag.menunggu,
-        urgent: ag.mendesak,
-      }));
+      const mappedAgents: DeskState[] = snapshot.agents.map((ag) => {
+        const seat = CAFE_SEAT_COORDS[ag.key];
+        const sx = seat ? seat[0] : ag.x;
+        const sz = seat ? seat[1] : ag.z;
+        return {
+          desk: { key: ag.key, room: ag.ruang, color: ag.warna, x: sx, z: sz },
+          agen: {
+            key: ag.key,
+            nama: ag.nama,
+            tugas: ag.tugas,
+            ruang: ag.ruang,
+            warna: ag.warna,
+            x: sx,
+            z: sz,
+          },
+          doing: { activity: ag.activity, label: ag.activityLabel },
+          bubble: ag.ringkasan.length <= 115 ? ag.ringkasan : `${ag.ringkasan.slice(0, 112)}…`,
+          waiting: ag.menunggu,
+          urgent: ag.mendesak,
+        };
+      });
+      return [spvDesk, ...mappedAgents];
     }
-    return officeDesks(isoDay(now), time, p.alwaysWork);
+    return [spvDesk, ...officeDesks(isoDay(now), time, p.alwaysWork)];
   }, [snapshot, p.lapse, p.alwaysWork, now, time]);
+
+  const pingFeeds: MonitorPingFeed[] = useMemo(() => {
+    if (!snapshot) return [];
+    return snapshot.agents.map((ag) => {
+      const t = ag.telemetry;
+      // Show in-router interface ping (e.g., vlan2000-CMK -> 1.1.1.1) on monitor if configured!
+      const activePing = t?.interfacePingResult ?? t?.ping;
+      return {
+        key: ag.key,
+        label: ag.routerConfig?.name ?? ag.nama,
+        host: t?.interfacePingResult ? t.interfacePingResult.label : (ag.routerConfig?.host ?? '-'),
+        simulated: ag.routerConfig?.simulated ?? true,
+        reachable: t?.reachable ?? false,
+        cpuPct: t?.cpuLoadPercent ?? 0,
+        pppoe: t?.activePppoeCount ?? 0,
+        hotspot: t?.activeHotspotCount ?? 0,
+        pingAvgMs: activePing?.avgMs ?? null,
+        pingLossPct: activePing?.packetLossPercent ?? 0,
+        pingStatus: activePing?.status ?? (t?.reachable ? 'ok' : 'down'),
+        hasAlert: ag.mendesak.length > 0 || ag.pendingApprovals.length > 0,
+      };
+    });
+  }, [snapshot]);
 
   const board = useMemo(() => {
     if (snapshot && !p.lapse) {
@@ -206,9 +300,13 @@ export default function App() {
       style={latar ? { background: latar } : undefined}
     >
       <div className="ko-stage">
-        <Suspense fallback={<div className="ko-loading">Menyiapkan Datacenter AI NOC…</div>}>
+        <Suspense fallback={<div className="ko-loading">Menyiapkan Cafe Datacenter AI NOC…</div>}>
           <OfficeScene
             desks={desks}
+            pingFeeds={pingFeeds}
+            externalPings={snapshot?.externalPings ?? []}
+            topologyLinks={snapshot?.topologyLinks ?? []}
+            activeAlerts={snapshot?.spvNoc?.activeAlerts ?? 0}
             night={night}
             boardCount={Math.min(board.items.length + radiusAlerts.length, 8)}
             anchors={anchors}
@@ -224,24 +322,30 @@ export default function App() {
         {g.tiltShift && <div className="ko-tilt" aria-hidden="true" />}
         <div className="ko-layer">
           {desks.map((d) => {
-            const liveAg = snapshot?.agents.find((a) => a.key === d.desk.key);
+            const isSpv = d.desk.key === 'spv-noc';
             return (
               <Tag
                 key={d.desk.key}
                 d={d}
-                aiLinked={Boolean(liveAg?.aiBridge?.linked)}
+                isSpv={isSpv}
                 spot={spotKey === d.desk.key}
                 idle={d.doing.activity === 'siaga' ? idleAt(d.desk.key, t).spot : null}
                 refFn={(el) => (el ? anchors.current.set(d.desk.key, el) : anchors.current.delete(d.desk.key))}
                 onOpen={() => {
                   cameraApi.current?.focusAgent(d.desk.key);
-                  setOpenKey(d.desk.key);
+                  if (isSpv) {
+                    setOpenKey(null);
+                    setSpvOpen(true);
+                  } else {
+                    setSpvOpen(false);
+                    setOpenKey(d.desk.key);
+                  }
                 }}
               />
             );
           })}
           <span className="ko-board-pin" ref={(el) => void (boardAnchor.current = el)}>
-            NOC Wall
+            Live Ping Wall
           </span>
         </div>
       </div>
@@ -264,12 +368,38 @@ export default function App() {
             <div className="noc-hud-actions">
               <button
                 type="button"
+                className="noc-fleet-btn noc-spv-btn"
+                onClick={() => {
+                  cameraApi.current?.focusAgent('spv-noc');
+                  setOpenKey(null);
+                  setSpvOpen(true);
+                }}
+                title="Buka 1 AI Supervisor SPV NOC (terhubung ke semua MikroTik & WA Fonnte)"
+              >
+                👑 <span className="noc-btn-lbl">SPV NOC</span>
+                {(snapshot?.spvNoc?.activeAlerts ?? 0) > 0 && (
+                  <span className="noc-spv-badge">{snapshot?.spvNoc?.activeAlerts}</span>
+                )}
+              </button>
+              <button
+                type="button"
+                className="noc-fleet-btn"
+                onClick={() => setTopoOpen(true)}
+                title="Buka Peta Topologi Kabel Fiber Interaktif (Tarik Kabel Manual)"
+              >
+                🗺 <span className="noc-btn-lbl">Topologi FO</span>
+                {(snapshot?.topologyLinks?.length ?? 0) > 0 && (
+                  <span className="noc-btn-short">{snapshot?.topologyLinks?.length}</span>
+                )}
+              </button>
+              <button
+                type="button"
                 className="noc-fleet-btn"
                 onClick={() => setFleetOpen((v) => !v)}
                 title="Buka daftar & pengaturan IP semua MikroTik"
               >
-                📡 <span className="noc-btn-lbl">{desks.length} Router</span>
-                <span className="noc-btn-short">{desks.length}</span>
+                📡 <span className="noc-btn-lbl">{Math.max(0, desks.length - 1)} Router</span>
+                <span className="noc-btn-short">{Math.max(0, desks.length - 1)}</span>
               </button>
               <button
                 type="button"
@@ -366,7 +496,9 @@ export default function App() {
           )}
 
           <ul>
-            {desks.map((d) => {
+            {desks
+              .filter((d) => d.desk.key !== 'spv-noc')
+              .map((d) => {
               const liveAg = snapshot?.agents.find((a) => a.key === d.desk.key);
               const tel = liveAg?.telemetry;
               const isSim = liveAg?.routerConfig?.simulated ?? true;
@@ -451,6 +583,18 @@ export default function App() {
                 ))}
               </ul>
             )}
+            {snapshot?.externalPings && snapshot.externalPings.length > 0 && (
+              <div className="noc-ping-bar">
+                {snapshot.externalPings.map((ep) => (
+                  <span key={ep.target} className={`noc-ping-chip is-${ep.status}`} title={`${ep.label} (${ep.target}) · Loss ${ep.packetLossPercent}%`}>
+                    📡 {ep.target}: <b>{ep.avgMs !== null ? `${ep.avgMs}ms` : 'RTO'}</b>
+                  </span>
+                ))}
+                <button type="button" className="noc-ping-refresh" onClick={() => void pingNow()} title="Test Ping sekarang">
+                  🔄
+                </button>
+              </div>
+            )}
             {board.metrics.length > 0 && (
               <dl>
                 {board.metrics.slice(0, 4).map((m, i) => (
@@ -520,12 +664,50 @@ export default function App() {
         </div>
       )}
 
-      {/* Admin Account & Password Modal */}
+      {/* Interactive Manual Fiber Topology 2D/3D Map Modal */}
+      {topoOpen && snapshot && (
+        <TopologyMapModal
+          snapshot={snapshot}
+          onAddLink={addTopologyLink}
+          onDeleteLink={deleteTopologyLink}
+          onSavePositions={saveTopologyPositions}
+          onOpenRouter={(routerId) => {
+            setTopoOpen(false);
+            cameraApi.current?.focusAgent(routerId);
+            setOpenKey(routerId);
+          }}
+          onClose={() => setTopoOpen(false)}
+        />
+      )}
+
+      {/* Centralized SPV NOC AI Command Center Modal */}
+      {spvOpen && snapshot && (
+        <SpvNocCommandModal
+          snapshot={snapshot}
+          initialPrompt={spvQuickPrompt}
+          onConsumeInitialPrompt={() => setSpvQuickPrompt(null)}
+          onAsk={askSpvNoc}
+          onSendSummaryWa={sendSpvSummaryWa}
+          onAddMemoryFact={addAiMemoryFact}
+          onDeleteMemoryFact={deleteAiMemoryFact}
+          onOpenRouter={(routerId) => {
+            setSpvOpen(false);
+            cameraApi.current?.focusAgent(routerId);
+            setOpenKey(routerId);
+          }}
+          onClose={() => setSpvOpen(false)}
+        />
+      )}
+
+      {/* Admin Account, Password & Fonnte WA Alert Settings Modal */}
       {accountOpen && (
         <AdminAccountModal
           username={adminUser ?? 'admin'}
+          alertSettings={snapshot?.alertSettings}
           onClose={() => setAccountOpen(false)}
           onChangePassword={changePassword}
+          onSaveAlerts={updateAlertSettings}
+          onTestWa={sendTestWhatsapp}
           onLogout={async () => {
             setAccountOpen(false);
             await logout();
@@ -567,8 +749,7 @@ export default function App() {
             {auditTab === 'logs' ? (
               <div className="noc-logs">
                 <p style={{ margin: '0 0 8px', fontSize: '0.78rem', color: '#475569' }}>
-                  ℹ️ Log otomatis ditarik langsung via RouterOS API (<code>/log/print</code>) setiap 15 detik + real-time
-                  UDP port <code>5514</code>. Alert <b>RADIUS timeout</b> langsung ditandai merah.
+                  ℹ️ Trafik &amp; Hotspot ditarik real-time tiap 3 detik via <b>1x login persistent</b> (tanpa keluar-masuk login) + log <code>/log/print</code> tiap ~9 detik &amp; Syslog UDP <code>5514</code>.
                 </p>
                 {!snapshot?.globalLogs || snapshot.globalLogs.length === 0 ? (
                   <p style={{ fontSize: '0.85rem', color: '#6a6380' }}>
@@ -592,47 +773,66 @@ export default function App() {
                     Belum ada tiket approval.
                   </p>
                 ) : (
-                  snapshot.approvals.map((tk) => (
-                    <div key={tk.id} className="noc-card">
-                      <div className="noc-card-head">
-                        <strong>
-                          #{tk.id} · {tk.routerName}
-                        </strong>
-                        <span className={`noc-status-pill is-${tk.status.toLowerCase()}`}>{tk.status}</span>
-                      </div>
-                      <p style={{ margin: '4px 0', fontSize: '0.84rem' }}>{tk.incidentSummary}</p>
-                      <pre className="noc-cmd">{tk.proposal.previewCommand}</pre>
-                      {tk.executionResult && (
-                        <small style={{ display: 'block', color: '#374151', marginBottom: '6px' }}>
-                          Hasil: <code>{tk.executionResult}</code>
-                        </small>
-                      )}
-                      <small style={{ color: '#6a6380' }}>
-                        Dibuat: {new Date(tk.createdAt).toLocaleString('id-ID')}
-                        {tk.decidedBy ? ` · Oleh ${tk.decidedBy}` : ''}
-                      </small>
-                      {tk.status === 'PENDING' && (
-                        <div className="noc-btn-row">
+                  snapshot.approvals.map((tk) => {
+                    const targetAgent = snapshot.agents.find((a) => a.routerId === tk.routerId);
+                    const writeReady = Boolean(targetAgent?.routerConfig?.writeExecutionReady);
+                    return (
+                      <div key={tk.id} className="noc-card">
+                        <div className="noc-card-head">
+                          <strong>
+                            #{tk.id} · {tk.routerName}
+                          </strong>
+                          <span className={`noc-status-pill is-${tk.status.toLowerCase()}`}>{tk.status}</span>
+                        </div>
+                        <p style={{ margin: '4px 0', fontSize: '0.84rem' }}>{tk.incidentSummary}</p>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '6px 0' }}>
+                          <pre className="noc-cmd" style={{ flex: 1, margin: 0 }}>{tk.proposal.previewCommand}</pre>
                           <button
                             type="button"
-                            className="noc-btn-approve"
-                            disabled={busyTicketId === tk.id}
-                            onClick={() => void decideApproval(tk.id, 'approve')}
+                            className="noc-btn-sim"
+                            style={{ whiteSpace: 'nowrap', marginTop: 0 }}
+                            onClick={() => void copyCliCommand(`audit-${tk.id}`, tk.proposal.previewCommand)}
+                            title="Salin perintah CLI untuk ditempel di Winbox Terminal"
                           >
-                            ✅ Setujui &amp; Eksekusi
-                          </button>
-                          <button
-                            type="button"
-                            className="noc-btn-reject"
-                            disabled={busyTicketId === tk.id}
-                            onClick={() => void decideApproval(tk.id, 'reject')}
-                          >
-                            ❌ Tolak
+                            {copiedCmdId === `audit-${tk.id}` ? '✅ Tersalin!' : '📋 Copy CLI'}
                           </button>
                         </div>
-                      )}
-                    </div>
-                  ))
+                        {tk.executionResult && (
+                          <small style={{ display: 'block', color: '#374151', marginBottom: '6px' }}>
+                            Hasil: <code>{tk.executionResult}</code>
+                          </small>
+                        )}
+                        <small style={{ color: '#6a6380' }}>
+                          Dibuat: {new Date(tk.createdAt).toLocaleString('id-ID')}
+                          {tk.decidedBy ? ` · Oleh ${tk.decidedBy}` : ''}
+                        </small>
+                        {tk.status === 'PENDING' && (
+                          <div className="noc-btn-row">
+                            <button
+                              type="button"
+                              className="noc-btn-approve"
+                              disabled={busyTicketId === tk.id}
+                              onClick={() => void decideApproval(tk.id, 'approve')}
+                            >
+                              {busyTicketId === tk.id
+                                ? 'Memproses…'
+                                : writeReady
+                                  ? '⚡ Setujui & Eksekusi via SPV'
+                                  : '✅ Tandai Ditangani Manual'}
+                            </button>
+                            <button
+                              type="button"
+                              className="noc-btn-reject"
+                              disabled={busyTicketId === tk.id}
+                              onClick={() => void decideApproval(tk.id, 'reject')}
+                            >
+                              ❌ Tutup / Tolak
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             )}
@@ -689,12 +889,61 @@ export default function App() {
                     {openLiveAgent.telemetry.voltageV !== null ? ` · ${openLiveAgent.telemetry.voltageV}V` : ''}
                   </strong>
                 </div>
-                {openLiveAgent.telemetry.activePppoeCount > 0 && (
+                {openLiveAgent.telemetry.interfacePingResult && (
                   <div>
-                    <span>PPPoE Aktif</span>
-                    <strong>{openLiveAgent.telemetry.activePppoeCount} sesi</strong>
+                    <span>Ping Jalur ({openLiveAgent.telemetry.interfacePingResult.label})</span>
+                    <strong
+                      style={{
+                        color:
+                          openLiveAgent.telemetry.interfacePingResult.status === 'ok'
+                            ? '#15803d'
+                            : openLiveAgent.telemetry.interfacePingResult.status === 'high'
+                              ? '#b45309'
+                              : '#dc2626',
+                      }}
+                    >
+                      {openLiveAgent.telemetry.interfacePingResult.avgMs !== null
+                        ? `${openLiveAgent.telemetry.interfacePingResult.avgMs} ms (max ${openLiveAgent.telemetry.interfacePingResult.maxMs} ms)`
+                        : 'RTO / PUTUS'}{' '}
+                      · Loss {openLiveAgent.telemetry.interfacePingResult.packetLossPercent}%
+                    </strong>
                   </div>
                 )}
+                {openLiveAgent.telemetry.ping && (
+                  <div>
+                    <span>Ping Router ({openLiveAgent.telemetry.ping.target})</span>
+                    <strong
+                      style={{
+                        color:
+                          openLiveAgent.telemetry.ping.status === 'ok'
+                            ? '#15803d'
+                            : openLiveAgent.telemetry.ping.status === 'high'
+                              ? '#b45309'
+                              : '#dc2626',
+                      }}
+                    >
+                      {openLiveAgent.telemetry.ping.avgMs !== null
+                        ? `${openLiveAgent.telemetry.ping.avgMs} ms (max ${openLiveAgent.telemetry.ping.maxMs} ms)`
+                        : 'RTO / DOWN'}{' '}
+                      · Loss {openLiveAgent.telemetry.ping.packetLossPercent}%
+                    </strong>
+                  </div>
+                )}
+                <div>
+                  <span>PPPoE / Hotspot Aktif</span>
+                  <strong>
+                    {openLiveAgent.telemetry.activePppoeCount} PPPoE · {openLiveAgent.telemetry.activeHotspotCount ?? 0} HS
+                  </strong>
+                </div>
+                <div>
+                  <span>Host Hotspot / DHCP</span>
+                  <strong>
+                    {openLiveAgent.telemetry.hotspotHostCount ?? 0} host · {openLiveAgent.telemetry.dhcpLeaseCount ?? 0} DHCP
+                    {(openLiveAgent.hotspotFailedLoginCount ?? 0) > 0
+                      ? ` · ⚠ ${openLiveAgent.hotspotFailedLoginCount} gagal login`
+                      : ''}
+                  </strong>
+                </div>
                 {openLiveAgent.telemetry.bgpPeersTotal > 0 && (
                   <div>
                     <span>BGP Peers</span>
@@ -710,13 +959,45 @@ export default function App() {
               <TelemetrySparkline history={openLiveAgent.telemetryHistory} />
             )}
 
-            {/* Antigravity AI Live Console (Highlighted for Rangga CCR Momo Net & available on all agents) */}
+            {/* Centralized SPV NOC Supervisor Link (1 AI Brain controls all routers) */}
             {connected && openLiveAgent && (
-              <AgentAiConsolePanel
-                key={`ai-${openLiveAgent.routerId}`}
-                agent={openLiveAgent}
-                onAsk={(q) => askAgentAi(openLiveAgent.routerId, q)}
-              />
+              <div className="noc-spv-banner">
+                <div>
+                  <strong>👑 Diawasi oleh SPV NOC (1 AI Terpusat)</strong>
+                  <small>
+                    Semua laporan anomali dari agen ini otomatis diteruskan ke SPV NOC &amp; WhatsApp Fonnte.
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="noc-btn-approve"
+                  style={{ marginTop: 0, whiteSpace: 'nowrap' }}
+                  onClick={() => {
+                    const rName = openLiveAgent.routerConfig?.name ?? openLiveAgent.nama;
+                    const rId = openLiveAgent.routerId;
+                    setOpenKey(null);
+                    setSpvQuickPrompt({
+                      text: `SPV NOC, laporkan analisa lengkap kondisi router ${rName} sekarang (CPU, PPPoE, Hotspot, gagal login, trafik, dan Ping).`,
+                      focusRouterId: rId,
+                    });
+                    cameraApi.current?.focusAgent('spv-noc');
+                    setSpvOpen(true);
+                  }}
+                >
+                  👑 Tanya SPV NOC
+                </button>
+              </div>
+            )}
+
+            {openLiveAgent?.telemetry?.pppoeDrop?.activeIncident && (
+              <p className="ko-sheet-urgent">
+                🚨 MASS-DISCONNECT PPPOE TERDETEKSI: -{openLiveAgent.telemetry.pppoeDrop.droppedCount} pelanggan terputus (
+                {openLiveAgent.telemetry.pppoeDrop.previousPeak} → {openLiveAgent.telemetry.pppoeDrop.currentCount}, -
+                {openLiveAgent.telemetry.pppoeDrop.droppedPercent}%)
+                {openLiveAgent.telemetry.pppoeDrop.suspectedOltInterfaces.length > 0
+                  ? ` · Indikasi OLT/Port: ${openLiveAgent.telemetry.pppoeDrop.suspectedOltInterfaces.join(', ')}`
+                  : ''}
+              </p>
             )}
 
             {openLiveAgent?.telemetry?.lastError && (
@@ -725,6 +1006,34 @@ export default function App() {
 
             {openDesk.urgent.length > 0 && (
               <p className="ko-sheet-urgent">⚠ Insiden Aktif: {openDesk.urgent.join(' · ')}</p>
+            )}
+
+            {openLiveAgent?.telemetry?.watchedLinks && openLiveAgent.telemetry.watchedLinks.length > 0 && (
+              <div className="noc-ifaces">
+                <h4>
+                  🔗 Link Watchdog Khusus ({openLiveAgent.routerConfig?.dutyLabel ?? 'Link Guard'})
+                </h4>
+                <div className="noc-iface-grid">
+                  {openLiveAgent.telemetry.watchedLinks.map((wl) => (
+                    <div
+                      key={wl.name}
+                      className={`noc-iface-pill ${wl.state === 'down' ? 'is-down' : wl.state === 'drop' ? 'is-drop' : 'is-up'}`}
+                    >
+                      <strong>
+                        {wl.name}{' '}
+                        {wl.state === 'down'
+                          ? '🔌 DOWN'
+                          : wl.state === 'drop'
+                            ? `📉 DROP -${wl.dropPercent}%`
+                            : '✅ OK'}
+                      </strong>
+                      <small>
+                        Rx {wl.rxMbps} / Tx {wl.txMbps} Mbps · Normal ~{wl.baselineMbps} Mbps
+                      </small>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
 
             {openLiveAgent?.telemetry && openLiveAgent.telemetry.interfaces.length > 0 && (
@@ -760,7 +1069,23 @@ export default function App() {
 
             {openLiveAgent && openLiveAgent.pendingApprovals.length > 0 && (
               <div className="noc-approvals">
-                <h4>🔒 Menunggu Persetujuan / Diagnostik (Human-in-the-Loop)</h4>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                  <h4 style={{ margin: 0 }}>🔒 Menunggu Persetujuan / Diagnostik (Human-in-the-Loop)</h4>
+                  <span
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      padding: '3px 8px',
+                      borderRadius: '999px',
+                      background: openLiveAgent.routerConfig?.writeExecutionReady ? '#dcfce7' : '#f1f5f9',
+                      color: openLiveAgent.routerConfig?.writeExecutionReady ? '#166534' : '#475569',
+                    }}
+                  >
+                    {openLiveAgent.routerConfig?.writeExecutionReady
+                      ? '⚡ SPV Write Aktif'
+                      : '🔒 Mode Read-Only (Manual Winbox)'}
+                  </span>
+                </div>
                 {openLiveAgent.pendingApprovals.map((tk) => (
                   <div key={tk.id} className="noc-card">
                     <div className="noc-card-head">
@@ -775,7 +1100,18 @@ export default function App() {
                     <p style={{ margin: '6px 0', fontSize: '0.85rem', color: '#4a4360' }}>
                       <b>Analisis AI:</b> {tk.rootCauseAnalysis}
                     </p>
-                    <pre className="noc-cmd">{tk.proposal.previewCommand}</pre>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '6px 0' }}>
+                      <pre className="noc-cmd" style={{ flex: 1, margin: 0 }}>{tk.proposal.previewCommand}</pre>
+                      <button
+                        type="button"
+                        className="noc-btn-sim"
+                        style={{ whiteSpace: 'nowrap', marginTop: 0 }}
+                        onClick={() => void copyCliCommand(tk.id, tk.proposal.previewCommand)}
+                        title="Salin perintah CLI untuk ditempel ke Winbox Terminal"
+                      >
+                        {copiedCmdId === tk.id ? '✅ Tersalin!' : '📋 Copy CLI'}
+                      </button>
+                    </div>
                     <small style={{ display: 'block', color: '#6a6380', marginBottom: '8px' }}>
                       Rollback: <code>{tk.proposal.rollbackCommand}</code>
                     </small>
@@ -786,7 +1122,11 @@ export default function App() {
                         disabled={busyTicketId === tk.id}
                         onClick={() => void decideApproval(tk.id, 'approve')}
                       >
-                        {busyTicketId === tk.id ? 'Mengeksekusi…' : '✅ Setujui / Tandai Ditangani'}
+                        {busyTicketId === tk.id
+                          ? 'Memproses…'
+                          : openLiveAgent.routerConfig?.writeExecutionReady
+                            ? '⚡ Setujui & Eksekusi via SPV'
+                            : '✅ Tandai Ditangani Manual'}
                       </button>
                       <button
                         type="button"
@@ -932,20 +1272,38 @@ function LoginGate({ onLogin }: { onLogin: (u: string, p: string) => Promise<voi
 
 function AdminAccountModal({
   username,
+  alertSettings,
   onClose,
   onChangePassword,
+  onSaveAlerts,
+  onTestWa,
   onLogout,
 }: {
   username: string;
+  alertSettings?: LiveAlertSettings;
   onClose: () => void;
   onChangePassword: (cur: string, nextPass: string, nextUser?: string) => Promise<void>;
+  onSaveAlerts: (patch: Partial<Omit<LiveAlertSettings, 'waTokenConfigured'>>) => Promise<LiveAlertSettings | undefined>;
+  onTestWa: (target?: string) => Promise<string>;
   onLogout: () => Promise<void>;
 }) {
+  const [tab, setTab] = useState<'wa' | 'account'>('wa');
   const [newUser, setNewUser] = useState(username);
   const [curPass, setCurPass] = useState('');
   const [newPass, setNewPass] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const [waEnabled, setWaEnabled] = useState(alertSettings?.waEnabled ?? true);
+  const [waTarget, setWaTarget] = useState(alertSettings?.waTarget ?? '');
+  const [dailyReportEnabled, setDailyReportEnabled] = useState(alertSettings?.dailyReportEnabled ?? true);
+  const [dailyReportHour, setDailyReportHour] = useState(String(alertSettings?.dailyReportHour ?? 8));
+  const [pingWarnMs, setPingWarnMs] = useState(String(alertSettings?.pingWarnMs ?? 50));
+  const [pingCritMs, setPingCritMs] = useState(String(alertSettings?.pingCritMs ?? 100));
+  const [extPingCritMs, setExtPingCritMs] = useState(String(alertSettings?.extPingCritMs ?? 150));
+  const [pingConfirmCount, setPingConfirmCount] = useState(String(alertSettings?.pingConfirmCount ?? 3));
+  const [cooldownMin, setCooldownMin] = useState(String(Math.round((alertSettings?.alertCooldownSec ?? 1800) / 60)));
+  const [waMsg, setWaMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -963,36 +1321,151 @@ function AdminAccountModal({
     }
   };
 
+  const handleSaveWa = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setWaMsg(null);
+    try {
+      await onSaveAlerts({
+        waEnabled,
+        waTarget: waTarget.trim(),
+        dailyReportEnabled,
+        dailyReportHour: Math.max(0, Math.min(23, Number(dailyReportHour) || 8)),
+        pingWarnMs: Math.max(5, Number(pingWarnMs) || 50),
+        pingCritMs: Math.max(10, Number(pingCritMs) || 100),
+        extPingCritMs: Math.max(20, Number(extPingCritMs) || 150),
+        pingConfirmCount: Math.max(1, Math.min(10, Number(pingConfirmCount) || 3)),
+        alertCooldownSec: Math.max(60, (Number(cooldownMin) || 30) * 60),
+      });
+      setWaMsg({ ok: true, text: 'Filter anti-spam WA & Laporan Harian berhasil disimpan!' });
+    } catch (err) {
+      setWaMsg({ ok: false, text: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan WA' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleTestWa = async () => {
+    setBusy(true);
+    setWaMsg(null);
+    try {
+      const detail = await onTestWa(waTarget.trim() || undefined);
+      setWaMsg({ ok: true, text: `✅ ${detail}` });
+    } catch (err) {
+      setWaMsg({ ok: false, text: err instanceof Error ? err.message : 'Tes WA gagal' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="ko-sheet" role="dialog" aria-label="Pengaturan Akun Admin" onClick={onClose}>
-      <div className="ko-sheet-in" style={{ width: 'min(460px, 94vw)' }} onClick={(e) => e.stopPropagation()}>
-        <h3>🔐 Pengaturan Akun Admin NOC</h3>
-        <form onSubmit={(e) => void handleUpdate(e)} className="noc-form-grid" style={{ gridTemplateColumns: '1fr' }}>
-          <label>
-            <span>Username Admin</span>
-            <input value={newUser} onChange={(e) => setNewUser(e.target.value)} required />
-          </label>
-          <label>
-            <span>Password Saat Ini</span>
-            <input type="password" value={curPass} onChange={(e) => setCurPass(e.target.value)} required />
-          </label>
-          <label>
-            <span>Password Baru (min. 6 karakter)</span>
-            <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} minLength={6} required />
-          </label>
-          {msg && <p className={`noc-feedback ${msg.ok ? 'is-ok' : 'is-err'}`}>{msg.text}</p>}
-          <div className="noc-btn-row">
-            <button type="submit" className="noc-btn-approve" disabled={busy}>
-              {busy ? 'Menyimpan…' : '💾 Simpan Password Baru'}
-            </button>
-            <button type="button" className="noc-btn-reject" onClick={() => void onLogout()}>
-              🚪 Logout
-            </button>
-            <button type="button" onClick={onClose} style={{ marginLeft: 'auto' }}>
-              Tutup
-            </button>
-          </div>
-        </form>
+    <div className="ko-sheet" role="dialog" aria-label="Pengaturan Admin dan Alert WA" onClick={onClose}>
+      <div className="ko-sheet-in" style={{ width: 'min(500px, 95vw)' }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 8px' }}>⚙️ Pengaturan NOC &amp; Notifikasi WhatsApp</h3>
+        <div className="noc-tabs">
+          <button type="button" className={tab === 'wa' ? 'is-active' : ''} onClick={() => setTab('wa')}>
+            📲 WA Fonnte &amp; Ping
+          </button>
+          <button type="button" className={tab === 'account' ? 'is-active' : ''} onClick={() => setTab('account')}>
+            🔐 Akun Admin ({username})
+          </button>
+        </div>
+
+        {tab === 'wa' ? (
+          <form onSubmit={(e) => void handleSaveWa(e)} className="noc-form-grid">
+            <div style={{ gridColumn: '1 / -1', fontSize: '0.78rem' }}>
+              Status Token Fonnte:{' '}
+              <b style={{ color: alertSettings?.waTokenConfigured ? '#15803d' : '#dc2626' }}>
+                {alertSettings?.waTokenConfigured ? '✅ Aktif (Terpasang di Server)' : '⚠ Belum diset di .env'}
+              </b>
+            </div>
+            <label style={{ gridColumn: '1 / -1' }}>
+              <span>Nomor WA Tujuan / ID Grup WA (Fonnte)</span>
+              <input
+                value={waTarget}
+                onChange={(e) => setWaTarget(e.target.value)}
+                placeholder="Contoh: 0812xxxxxxxx"
+              />
+            </label>
+            <label>
+              <span>Ping Kritis Router (ms)</span>
+              <input type="number" min={10} max={5000} value={pingCritMs} onChange={(e) => setPingCritMs(e.target.value)} />
+            </label>
+            <label>
+              <span>Ping Kritis Internet (ms)</span>
+              <input type="number" min={20} max={5000} value={extPingCritMs} onChange={(e) => setExtPingCritMs(e.target.value)} />
+            </label>
+            <label>
+              <span>Konfirmasi Berturut (x cek)</span>
+              <input type="number" min={1} max={10} value={pingConfirmCount} onChange={(e) => setPingConfirmCount(e.target.value)} />
+            </label>
+            <label>
+              <span>Jeda Anti-Spam (menit)</span>
+              <input type="number" min={1} max={1440} value={cooldownMin} onChange={(e) => setCooldownMin(e.target.value)} />
+            </label>
+            <label>
+              <span>Jam Laporan Harian (0–23)</span>
+              <input type="number" min={0} max={23} value={dailyReportHour} onChange={(e) => setDailyReportHour(e.target.value)} />
+            </label>
+            <label>
+              <span>Ping Waspada Dashboard (ms)</span>
+              <input type="number" min={5} max={2000} value={pingWarnMs} onChange={(e) => setPingWarnMs(e.target.value)} />
+            </label>
+            <div className="noc-check-row" style={{ gridColumn: '1 / -1', margin: '2px 0' }}>
+              <label>
+                <input type="checkbox" checked={dailyReportEnabled} onChange={(e) => setDailyReportEnabled(e.target.checked)} />
+                <span>Kirim Laporan Harian 1x/hari (jam {String(Number(dailyReportHour) || 8).padStart(2, '0')}:00)</span>
+              </label>
+              <label>
+                <input type="checkbox" checked={waEnabled} onChange={(e) => setWaEnabled(e.target.checked)} />
+                <span>Mode Anti-Spam: HANYA kirim alert segera jika KRITIS terkonfirmasi ({pingConfirmCount}x berturut)</span>
+              </label>
+            </div>
+            {waMsg && (
+              <p className={`noc-feedback ${waMsg.ok ? 'is-ok' : 'is-err'}`} style={{ gridColumn: '1 / -1' }}>
+                {waMsg.text}
+              </p>
+            )}
+            <div className="noc-btn-row" style={{ gridColumn: '1 / -1' }}>
+              <button type="submit" className="noc-btn-approve" disabled={busy}>
+                {busy ? 'Menyimpan…' : '💾 Simpan Alert WA'}
+              </button>
+              <button type="button" className="noc-btn-sim" disabled={busy} onClick={() => void handleTestWa()}>
+                📲 Tes Kirim WA
+              </button>
+              <button type="button" onClick={onClose} style={{ marginLeft: 'auto' }}>
+                Tutup
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={(e) => void handleUpdate(e)} className="noc-form-grid" style={{ gridTemplateColumns: '1fr' }}>
+            <label>
+              <span>Username Admin</span>
+              <input value={newUser} onChange={(e) => setNewUser(e.target.value)} required />
+            </label>
+            <label>
+              <span>Password Saat Ini</span>
+              <input type="password" value={curPass} onChange={(e) => setCurPass(e.target.value)} required />
+            </label>
+            <label>
+              <span>Password Baru (min. 6 karakter)</span>
+              <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} minLength={6} required />
+            </label>
+            {msg && <p className={`noc-feedback ${msg.ok ? 'is-ok' : 'is-err'}`}>{msg.text}</p>}
+            <div className="noc-btn-row">
+              <button type="submit" className="noc-btn-approve" disabled={busy}>
+                {busy ? 'Menyimpan…' : '💾 Simpan Password Baru'}
+              </button>
+              <button type="button" className="noc-btn-reject" onClick={() => void onLogout()}>
+                🚪 Logout
+              </button>
+              <button type="button" onClick={onClose} style={{ marginLeft: 'auto' }}>
+                Tutup
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );
@@ -1119,6 +1592,16 @@ function RouterConfigPanel({
 }) {
   const cfg = agent.routerConfig!;
   const [expanded, setExpanded] = useState(cfg.simulated || !agent.telemetry?.reachable);
+  const [routerName, setRouterName] = useState(cfg.name);
+  const [agentName, setAgentName] = useState(cfg.agentName ?? agent.nama);
+  const [dutyRole, setDutyRole] = useState<LiveAgentDutyRole>(cfg.dutyRole ?? 'branch_dist');
+  const [dutyLabel, setDutyLabel] = useState(cfg.dutyLabel ?? '');
+  const [watchedCsv, setWatchedCsv] = useState((cfg.watchedInterfaces ?? []).join(', '));
+  const [dropPct, setDropPct] = useState(String(cfg.trafficDropThresholdPct ?? 55));
+  const [minMbps, setMinMbps] = useState(String(cfg.minTrafficMbps ?? 0));
+  const [ifPingIface, setIfPingIface] = useState(cfg.interfacePing?.interfaceName ?? '');
+  const [ifPingTarget, setIfPingTarget] = useState(cfg.interfacePing?.target ?? '1.1.1.1');
+  const [customPrompt, setCustomPrompt] = useState(cfg.customPrompt ?? '');
   const [host, setHost] = useState(cfg.host);
   const [port, setPort] = useState(String(cfg.port));
   const [useTls, setUseTls] = useState(cfg.useTls);
@@ -1143,15 +1626,39 @@ function RouterConfigPanel({
     }
   };
 
-  const buildPatch = (clearPassword = false): RouterConfigPatch => ({
-    host: host.trim(),
-    port: parsedPort,
-    useTls,
-    routerOsVersion: rosVer,
-    readUsername: readUsername.trim() || 'noc_readonly',
-    ...(clearPassword ? { clearReadPassword: true } : readPassword ? { readPassword } : {}),
-    simulated,
-  });
+  const buildPatch = (clearPassword = false): RouterConfigPatch => {
+    const watchedList = watchedCsv
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const ifPingClean =
+      ifPingIface.trim() && ifPingTarget.trim()
+        ? {
+            interfaceName: ifPingIface.trim(),
+            target: ifPingTarget.trim(),
+            warnMs: cfg.interfacePing?.warnMs ?? 80,
+            critMs: cfg.interfacePing?.critMs ?? 140,
+          }
+        : null;
+    return {
+      name: routerName.trim() || cfg.name,
+      agentName: agentName.trim() || cfg.agentName || agent.nama,
+      dutyRole,
+      dutyLabel: dutyLabel.trim(),
+      watchedInterfaces: watchedList,
+      trafficDropThresholdPct: Math.max(10, Math.min(95, Number(dropPct) || 55)),
+      minTrafficMbps: Math.max(0, Number(minMbps) || 0),
+      interfacePing: ifPingClean,
+      customPrompt: customPrompt.trim(),
+      host: host.trim(),
+      port: parsedPort,
+      useTls,
+      routerOsVersion: rosVer,
+      readUsername: readUsername.trim() || 'noc_readonly',
+      ...(clearPassword ? { clearReadPassword: true } : readPassword ? { readPassword } : {}),
+      simulated,
+    };
+  };
 
   const handleSave = async (clearPassword = false) => {
     setBusy(true);
@@ -1227,12 +1734,83 @@ function RouterConfigPanel({
   return (
     <div className="noc-config-box">
       <button type="button" className="noc-config-toggle" onClick={() => setExpanded((v) => !v)}>
-        <span>⚙️ Konfigurasi Koneksi MikroTik &amp; CLI Setup</span>
+        <span>⚙️ Edit Nama Agen, Role Link Watchdog, Prompt SOP &amp; Koneksi</span>
         <span>{expanded ? '▲' : '▼'}</span>
       </button>
       {expanded && (
         <div className="noc-config-body">
           <div className="noc-form-grid">
+            <label>
+              <span>Nama Agen (Tampil di 3D)</span>
+              <input value={agentName} onChange={(e) => setAgentName(e.target.value)} placeholder="Contoh: Bima · Master Backbone" />
+            </label>
+            <label>
+              <span>Nama Router MikroTik</span>
+              <input value={routerName} onChange={(e) => setRouterName(e.target.value)} placeholder="Contoh: CRS-Backbone-01" />
+            </label>
+            <label>
+              <span>Role Tugas Khusus Agen</span>
+              <select value={dutyRole} onChange={(e) => setDutyRole(e.target.value as LiveAgentDutyRole)}>
+                <option value="backbone_master">🛡 Master Backbone &amp; Suplai CRS</option>
+                <option value="link_guard">🔗 Link &amp; Ethernet Backbone Guard</option>
+                <option value="core_vlan_watchdog">⚡ Core VLAN Watchdog (vlan2000-CMK)</option>
+                <option value="bras_gateway">🌐 BRAS Pusat (PPPoE, Hotspot &amp; OLT)</option>
+                <option value="branch_dist">📡 Distribusi Cabang (RB750)</option>
+              </select>
+            </label>
+            <label>
+              <span>Label Tugas Singkat</span>
+              <input value={dutyLabel} onChange={(e) => setDutyLabel(e.target.value)} placeholder="Contoh: Core VLAN Watchdog (vlan2000-CMK)" />
+            </label>
+            <label style={{ gridColumn: '1 / -1' }}>
+              <span>Interface Khusus Dipantau (pisahkan koma — cek Link Down &amp; Trafik Drop)</span>
+              <input
+                value={watchedCsv}
+                onChange={(e) => setWatchedCsv(e.target.value)}
+                placeholder="Contoh: vlan2000-CMK, ether1-METRO CMK"
+              />
+            </label>
+            <label>
+              <span>Ambang Trafik Drop (%)</span>
+              <input value={dropPct} onChange={(e) => setDropPct(e.target.value)} type="number" min={10} max={95} />
+            </label>
+            <label>
+              <span>Batas Min Trafik Normal (Mbps, 0=auto)</span>
+              <input value={minMbps} onChange={(e) => setMinMbps(e.target.value)} type="number" min={0} max={10000} />
+            </label>
+            <label>
+              <span>Ping via Interface (Dari Dalam Router)</span>
+              <input
+                value={ifPingIface}
+                onChange={(e) => setIfPingIface(e.target.value)}
+                placeholder="Contoh: vlan2000-CMK (kosong = nonaktif)"
+              />
+            </label>
+            <label>
+              <span>Target Ping Internet via Interface</span>
+              <input
+                value={ifPingTarget}
+                onChange={(e) => setIfPingTarget(e.target.value)}
+                placeholder="Contoh: 1.1.1.1"
+              />
+            </label>
+            <label style={{ gridColumn: '1 / -1' }}>
+              <span>Instruksi / Prompt SOP Khusus untuk Agen Ini (Dibaca SPV NOC)</span>
+              <textarea
+                rows={2}
+                value={customPrompt}
+                onChange={(e) => setCustomPrompt(e.target.value)}
+                placeholder="Contoh: Prioritaskan vlan2000-CMK penyuplai CCR Mongkonai. Jika drop atau ping naik, segera eskalasi ke SPV NOC."
+                style={{
+                  padding: '6px 8px',
+                  border: '1px solid #d4cbe6',
+                  borderRadius: '8px',
+                  font: 'inherit',
+                  fontSize: '0.8rem',
+                  resize: 'vertical',
+                }}
+              />
+            </label>
             <label>
               <span>IP / Host MikroTik</span>
               <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.88.x" />
@@ -1359,114 +1937,338 @@ function RouterConfigPanel({
   );
 }
 
-function AgentAiConsolePanel({
-  agent,
+function SpvNocCommandModal({
+  snapshot,
+  initialPrompt,
+  onConsumeInitialPrompt,
   onAsk,
+  onSendSummaryWa,
+  onAddMemoryFact,
+  onDeleteMemoryFact,
+  onOpenRouter,
+  onClose,
 }: {
-  agent: LiveOfficeAgent;
-  onAsk: (question: string) => Promise<{ reply: string; source: string }>;
+  snapshot: LiveNocSnapshot;
+  initialPrompt: { text: string; focusRouterId?: string } | null;
+  onConsumeInitialPrompt: () => void;
+  onAsk: (question: string, focusRouterId?: string) => Promise<{ reply: string; source: string }>;
+  onSendSummaryWa: (target?: string) => Promise<string>;
+  onAddMemoryFact: (text: string, topic?: string) => Promise<void>;
+  onDeleteMemoryFact: (factId: string) => Promise<void>;
+  onOpenRouter: (routerId: string) => void;
+  onClose: () => void;
 }) {
-  const bridge = agent.aiBridge;
-  const isLinked = Boolean(bridge?.linked);
-  const [expanded, setExpanded] = useState(isLinked);
+  const spv = snapshot.spvNoc;
+  const memory = snapshot.aiMemory;
+  const [tab, setTab] = useState<'chat' | 'reports' | 'memory'>('chat');
   const [question, setQuestion] = useState('');
+  const [newFactText, setNewFactText] = useState('');
+  const [newFactTopic, setNewFactTopic] = useState('SOP & Topologi');
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [waBusy, setWaBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const sendPrompt = async (text: string) => {
+  const sendPrompt = async (text: string, focusRouterId?: string) => {
     const clean = text.trim();
     if (!clean || busy) return;
     setBusy(true);
-    setErr(null);
+    setFeedback(null);
     setQuestion('');
+    setTab('chat');
     try {
-      await onAsk(clean);
+      await onAsk(clean, focusRouterId);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Gagal menghubungi agen AI');
+      setFeedback({ ok: false, text: e instanceof Error ? e.message : 'Gagal menghubungi SPV NOC' });
     } finally {
       setBusy(false);
     }
   };
 
-  const messages = bridge?.messages ?? [];
+  useEffect(() => {
+    if (initialPrompt) {
+      onConsumeInitialPrompt();
+      void sendPrompt(initialPrompt.text, initialPrompt.focusRouterId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt]);
+
+  const handleSendWaSummary = async () => {
+    setWaBusy(true);
+    setFeedback(null);
+    try {
+      const detail = await onSendSummaryWa();
+      setFeedback({ ok: true, text: `📲 Rekap SPV NOC terkirim ke WA (${snapshot.alertSettings?.waTarget || 'Fonnte'}): ${detail}` });
+    } catch (e) {
+      setFeedback({ ok: false, text: e instanceof Error ? e.message : 'Gagal mengirim rekap WA' });
+    } finally {
+      setWaBusy(false);
+    }
+  };
+
+  const totalPppoe = snapshot.agents.reduce((s, a) => s + (a.telemetry?.activePppoeCount ?? 0), 0);
+  const totalHotspot = snapshot.agents.reduce((s, a) => s + (a.telemetry?.activeHotspotCount ?? 0), 0);
+  const onlineCount = snapshot.agents.filter((a) => a.telemetry?.reachable).length;
+  const messages = spv?.messages ?? [];
+  const reports = spv?.reports ?? [];
 
   return (
-    <div className={`noc-ai-box ${isLinked ? 'is-linked' : ''}`}>
-      <button type="button" className="noc-ai-toggle" onClick={() => setExpanded((v) => !v)}>
-        <span>
-          {isLinked ? '⚡ Antigravity AI Terhubung' : '🤖 Konsol AI NOC'} ·{' '}
-          <small>{bridge?.agentLabel ?? agent.nama}</small>
-        </span>
-        <span>{expanded ? '▲' : '▼'}</span>
-      </button>
-      {expanded && (
-        <div className="noc-ai-body">
-          {bridge?.lastBriefing && (
-            <div className="noc-ai-brief">
-              <strong>📡 Status Antigravity Link:</strong> {bridge.lastBriefing}
-            </div>
-          )}
-          <div className="noc-ai-chips">
-            <button type="button" disabled={busy} onClick={() => void sendPrompt('Analisa kondisi router sekarang')}>
-              📊 Analisa Kondisi
+    <div className="ko-sheet" role="dialog" aria-label="SPV NOC AI Supervisor Command Center" onClick={onClose}>
+      <div
+        className="ko-sheet-in"
+        style={{ width: 'min(740px, 96vw)', maxHeight: '88vh', overflowY: 'auto' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <div>
+            <h3 style={{ margin: 0 }}>👑 SPV NOC — AI Supervisor Terpusat</h3>
+            <small style={{ color: '#475569' }}>
+              {spv?.modelLabel ?? 'Gemini Cloud AI'} · Mengontrol {snapshot.agents.length} Router &amp; Lapor WA ke{' '}
+              <b>{snapshot.alertSettings?.waTarget || '(belum diset)'}</b>
+            </small>
+          </div>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button type="button" className="noc-btn-approve" disabled={waBusy} onClick={() => void handleSendWaSummary()}>
+              {waBusy ? 'Mengirim…' : '📲 Kirim Rekap ke WA'}
             </button>
-            <button type="button" disabled={busy} onClick={() => void sendPrompt('Interface dan OLT mana trafik paling tinggi?')}>
-              🌐 Top Trafik OLT
-            </button>
-            <button type="button" disabled={busy} onClick={() => void sendPrompt('Cek apakah ada radius timeout atau log error')}>
-              🚨 Cek RADIUS &amp; Log
-            </button>
-            <button type="button" disabled={busy} onClick={() => void sendPrompt('Cek suhu, CPU, RAM dan PPPoE aktif')}>
-              🌡 Suhu &amp; PPPoE
+            <button type="button" onClick={onClose} style={{ marginTop: 0 }}>
+              Tutup
             </button>
           </div>
-          {messages.length > 0 && (
-            <div className="noc-ai-chat">
-              {messages.slice(-8).map((m) => (
-                <div key={m.id} className={`noc-ai-msg is-${m.role}`}>
-                  <div className="noc-ai-msg-meta">
-                    <b>{m.role === 'user' ? 'Anda' : m.source}</b>
-                    <span>{new Date(m.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}</span>
-                  </div>
-                  <pre>{m.text}</pre>
-                </div>
-              ))}
-            </div>
-          )}
-          <form
-            className="noc-ai-input-row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void sendPrompt(question);
-            }}
-          >
-            <input
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              placeholder={`Tanya ${agent.nama} (mis. cek trafik OLT, PPPoE, suhu, RADIUS)…`}
-              disabled={busy}
-            />
-            <button type="submit" className="noc-btn-approve" disabled={busy || !question.trim()}>
-              {busy ? '…' : 'Kirim'}
-            </button>
-          </form>
-          {err && <p className="noc-feedback is-err">{err}</p>}
         </div>
-      )}
+
+        <div className="noc-metrics-grid" style={{ marginTop: '10px' }}>
+          <div>
+            <span>Fleet Router Online</span>
+            <strong>
+              {onlineCount}/{snapshot.agents.length} ({spv?.liveRouters ?? 0} LIVE)
+            </strong>
+          </div>
+          <div>
+            <span>Total Pelanggan Aktif</span>
+            <strong>
+              {totalPppoe} PPPoE · {totalHotspot} Hotspot
+            </strong>
+          </div>
+          <div>
+            <span>Ping Internet &amp; Alert</span>
+            <strong>
+              {(snapshot.externalPings ?? [])
+                .map((p) => `${p.target}: ${p.avgMs !== null ? `${p.avgMs}ms` : 'RTO'}`)
+                .join(' · ') || 'Menunggu ping…'}
+            </strong>
+          </div>
+        </div>
+
+        <div className="noc-tabs">
+          <button type="button" className={tab === 'chat' ? 'is-active' : ''} onClick={() => setTab('chat')}>
+            🤖 Chat AI SPV NOC ({messages.length})
+          </button>
+          <button type="button" className={tab === 'reports' ? 'is-active' : ''} onClick={() => setTab('reports')}>
+            📥 Laporan Agen ({reports.length})
+          </button>
+          <button type="button" className={tab === 'memory' ? 'is-active' : ''} onClick={() => setTab('memory')}>
+            🧠 Memori AI ({memory?.learnedFacts.length ?? 0} fakta · {memory?.totalConversations ?? 0} chat)
+          </button>
+        </div>
+
+        {tab === 'chat' ? (
+          <div className="noc-ai-body" style={{ padding: 0 }}>
+            <div className="noc-ai-chips">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void sendPrompt('Berikan laporan ringkas kondisi semua router MikroTik yang live sekarang')}
+              >
+                📊 Laporan Semua Router
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void sendPrompt('Berapa total user hotspot & PPPoE di semua router dan apakah ada yang gagal login?')}
+              >
+                📶 Hotspot &amp; Gagal Login
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void sendPrompt('Cek ping semua router live dan internet 1.1.1.1 / 8.8.8.8, apakah ada yang membengkak?')}
+              >
+                📡 Cek Semua Ping
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void sendPrompt(
+                    'Cek status seluruh link backbone CRS-BB01..03, suplai ethernet/SFP, serta trafik dan ping internet melalui vlan2000-CMK di CORE MONGKONAI sekarang.',
+                  )
+                }
+              >
+                🔗 Link Backbone &amp; vlan2000
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void sendPrompt('Apakah ada anomali, CPU tinggi, atau RADIUS timeout dari laporan agen NOC?')}
+              >
+                🚨 Cek Semua Anomali
+              </button>
+            </div>
+
+            {messages.length > 0 && (
+              <div className="noc-ai-chat" style={{ maxHeight: '300px' }}>
+                {messages.slice(-10).map((m) => (
+                  <div key={m.id} className={`noc-ai-msg is-${m.role}`}>
+                    <div className="noc-ai-msg-meta">
+                      <b>{m.source || (m.role === 'user' ? 'Boss / Admin' : 'SPV NOC')}</b>
+                      <span>{new Date(m.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}</span>
+                    </div>
+                    <pre>{m.text}</pre>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <form
+              className="noc-ai-input-row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void sendPrompt(question);
+              }}
+            >
+              <input
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                placeholder='Tanya SPV NOC atau ajari langsung (ketik "Ingat ya: ...")'
+                disabled={busy}
+              />
+              <button type="submit" className="noc-btn-approve" disabled={busy || !question.trim()}>
+                {busy ? 'Menganalisa…' : 'Kirim'}
+              </button>
+            </form>
+          </div>
+        ) : tab === 'memory' ? (
+          <div className="noc-spv-reports">
+            <p style={{ margin: '0 0 6px', fontSize: '0.8rem', color: '#475569' }}>
+              🧠 Semua percakapan Anda (Web &amp; Telegram) tersimpan otomatis (<b>{memory?.totalConversations ?? 0} chat</b>{' '}
+              diarsipkan) untuk melatih <b>Gemini Cloud AI</b> &amp; <b>AI Lokal</b>. Anda juga bisa langsung mengajari SPV NOC
+              lewat form di bawah atau mengetik <code>Ingat ya: ...</code> di chat / Telegram!
+            </p>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!newFactText.trim()) return;
+                setBusy(true);
+                setFeedback(null);
+                try {
+                  await onAddMemoryFact(newFactText.trim(), newFactTopic.trim() || 'SOP & Topologi');
+                  setNewFactText('');
+                  setFeedback({ ok: true, text: '🧠 Pengetahuan baru tersimpan! AI Lokal & Gemini kini mengingatnya.' });
+                } catch (err) {
+                  setFeedback({ ok: false, text: err instanceof Error ? err.message : 'Gagal menyimpan memori' });
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="noc-form-grid"
+              style={{ marginBottom: '8px' }}
+            >
+              <label>
+                <span>Kategori / Topik</span>
+                <input value={newFactTopic} onChange={(e) => setNewFactTopic(e.target.value)} placeholder="SOP & Topologi" />
+              </label>
+              <label style={{ gridColumn: '1 / -1' }}>
+                <span>Ajari SPV NOC Fakta / SOP / Rute Baru</span>
+                <input
+                  value={newFactText}
+                  onChange={(e) => setNewFactText(e.target.value)}
+                  placeholder="Contoh: OLT Global 01 melayani area Utara; kalau putus cek tiang FO simpang Mongkonai."
+                  required
+                />
+              </label>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <button type="submit" className="noc-btn-approve" disabled={busy || !newFactText.trim()}>
+                  {busy ? 'Menyimpan…' : '🧠 Simpan ke Memori AI'}
+                </button>
+              </div>
+            </form>
+            {!memory || memory.learnedFacts.length === 0 ? (
+              <p style={{ fontSize: '0.82rem', color: '#64748b' }}>
+                Belum ada catatan manual. Coba tambahkan fakta topologi/SOP di atas atau ketik &ldquo;Ingat ya: ...&rdquo; di chat!
+              </p>
+            ) : (
+              memory.learnedFacts.map((f) => (
+                <div key={f.id} className="noc-spv-report-item">
+                  <div className="noc-card-head">
+                    <strong>
+                      🧠 [{f.topic}] <small>oleh {f.source}</small>
+                    </strong>
+                    <button
+                      type="button"
+                      className="noc-link-btn"
+                      style={{ color: '#dc2626' }}
+                      onClick={() => void onDeleteMemoryFact(f.id)}
+                    >
+                      Hapus
+                    </button>
+                  </div>
+                  <p style={{ margin: '4px 0 0', fontSize: '0.82rem' }}>{f.text}</p>
+                </div>
+              ))
+            )}
+          </div>
+        ) : (
+          <div className="noc-spv-reports">
+            {reports.length === 0 ? (
+              <p style={{ fontSize: '0.84rem', color: '#475569' }}>
+                ✅ Belum ada laporan anomali yang masuk ke SPV NOC. Semua agen NOC terus memantau &amp; akan langsung melapor
+                jika Ping membengkak, RADIUS timeout, atau router bermasalah.
+              </p>
+            ) : (
+              reports.map((rep) => (
+                <div key={rep.id} className={`noc-spv-report-item is-${rep.severity}`}>
+                  <div className="noc-card-head">
+                    <strong>
+                      [{rep.category.toUpperCase()}] {rep.routerName} · <small>{rep.agentName}</small>
+                    </strong>
+                    <span>
+                      {rep.sentToWa && <span className="noc-status-pill is-executed">✅ WA Fonnte</span>}{' '}
+                      <small>{new Date(rep.timestamp).toLocaleTimeString('id-ID')}</small>
+                    </span>
+                  </div>
+                  <p style={{ margin: '4px 0 0', fontSize: '0.82rem' }}>{rep.message}</p>
+                  {rep.routerId !== 'spv-noc' && (
+                    <button
+                      type="button"
+                      className="noc-link-btn"
+                      style={{ marginTop: '4px' }}
+                      onClick={() => onOpenRouter(rep.routerId)}
+                    >
+                      Buka detail {rep.routerName} →
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {feedback && <p className={`noc-feedback ${feedback.ok ? 'is-ok' : 'is-err'}`}>{feedback.text}</p>}
+      </div>
     </div>
   );
 }
 
 function Tag({
   d,
-  aiLinked,
+  isSpv,
   spot,
   idle,
   refFn,
   onOpen,
 }: {
   d: DeskState;
-  aiLinked: boolean;
+  isSpv: boolean;
   spot: boolean;
   idle: IdleSpot | null;
   refFn: (el: HTMLElement | null) => void;
@@ -1479,12 +2281,12 @@ function Tag({
       ? '🚨'
       : d.waiting.length > 0
         ? '🔒'
-        : aiLinked
-          ? '⚡AI'
+        : isSpv
+          ? '👑AI'
           : null;
   return (
     <div
-      className={`ko-tag ${aiLinked ? 'is-ai-linked' : ''}`}
+      className={`ko-tag ${isSpv ? 'is-spv is-ai-linked' : ''}`}
       ref={refFn}
       data-act={a}
       style={{ ['--agent' as string]: d.desk.color }}

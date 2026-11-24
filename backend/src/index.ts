@@ -14,6 +14,9 @@ import { NocOrchestrator } from './orchestrator.js';
 import { SecretVault } from './secretVault.js';
 import { AdminAuthManager } from './auth.js';
 import { AntigravityBridgeStore } from './antigravityBridge.js';
+import { FonnteWhatsappNotifier } from './fonnteNotifier.js';
+import { TopologyStore } from './topologyStore.js';
+import { AiMemoryStore } from './aiMemoryStore.js';
 import { SyslogUdpServer, parseMikrotikSyslog } from './syslogReceiver.js';
 import type { NocSnapshot } from './types.js';
 
@@ -43,6 +46,7 @@ const ChangePasswordSchema = z.object({
 
 const AskAgentSchema = z.object({
   question: z.string().trim().min(1).max(600),
+  focusRouterId: z.string().trim().max(64).optional(),
 });
 
 const BridgeReportSchema = z.object({
@@ -52,8 +56,100 @@ const BridgeReportSchema = z.object({
   agentLabel: z.string().trim().min(1).max(80).optional(),
 });
 
+const AlertSettingsPatchSchema = z.object({
+  waEnabled: z.boolean().optional(),
+  waTarget: z
+    .string()
+    .trim()
+    .max(120)
+    .regex(/^[0-9,+\-@a-zA-Z._\s]*$/, 'Format nomor/grup WA tidak valid')
+    .optional(),
+  dailyReportEnabled: z.boolean().optional(),
+  dailyReportHour: z.number().int().min(0).max(23).optional(),
+  pingWarnMs: z.number().int().min(5).max(2000).optional(),
+  pingCritMs: z.number().int().min(10).max(5000).optional(),
+  extPingCritMs: z.number().int().min(20).max(5000).optional(),
+  pingLossCritPct: z.number().int().min(5).max(100).optional(),
+  pingConfirmCount: z.number().int().min(1).max(10).optional(),
+  pppoeMassDropCount: z.number().int().min(5).max(500).optional(),
+  alertCooldownSec: z.number().int().min(60).max(86400).optional(),
+});
+
+const NewTopologyLinkSchema = z.object({
+  fromRouterId: z.string().trim().min(1).max(64),
+  fromInterface: z.string().trim().max(64).default(''),
+  toRouterId: z.string().trim().min(1).max(64),
+  toInterface: z.string().trim().max(64).default(''),
+  label: z.string().trim().max(80).optional(),
+  fiberType: z.enum(['backbone', 'vlan', 'olt', 'backup']).default('backbone'),
+  color: z.string().trim().max(24).optional(),
+});
+
+const TopologyPositionsSchema = z.object({
+  positions: z
+    .array(
+      z.object({
+        routerId: z.string().trim().min(1).max(64),
+        x: z.number().min(0).max(2000),
+        y: z.number().min(0).max(2000),
+      }),
+    )
+    .max(40),
+});
+
+const NewMemoryFactSchema = z.object({
+  text: z.string().trim().min(4).max(450),
+  topic: z.string().trim().max(60).optional(),
+});
+
+const TestWaSchema = z.object({
+  target: z
+    .string()
+    .trim()
+    .max(120)
+    .regex(/^[0-9,+\-@a-zA-Z._\s]*$/, 'Format nomor/grup WA tidak valid')
+    .optional(),
+});
+
+const InterfacePingConfigSchema = z
+  .object({
+    interfaceName: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(/^[a-zA-Z0-9._:/\s-]+$/, 'Nama interface tidak valid'),
+    target: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^[a-zA-Z0-9._:-]+$/, 'Target IP/host ping tidak valid'),
+    warnMs: z.number().int().min(5).max(2000).optional(),
+    critMs: z.number().int().min(10).max(5000).optional(),
+  })
+  .nullable();
+
 const RouterUpdateSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
+  agentName: z.string().trim().min(1).max(64).optional(),
+  dutyRole: z.enum(['backbone_master', 'link_guard', 'core_vlan_watchdog', 'bras_gateway', 'branch_dist']).optional(),
+  dutyLabel: z.string().trim().max(90).optional(),
+  watchedInterfaces: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .regex(/^[a-zA-Z0-9._:/\s-]+$/, 'Nama interface tidak valid'),
+    )
+    .max(20)
+    .optional(),
+  trafficDropThresholdPct: z.number().int().min(10).max(95).optional(),
+  minTrafficMbps: z.number().min(0).max(10000).optional(),
+  interfacePing: InterfacePingConfigSchema.optional(),
+  customPrompt: z.string().trim().max(600).optional(),
   host: z
     .string()
     .trim()
@@ -154,6 +250,26 @@ export async function createNocServer() {
   const aiBridge = new AntigravityBridgeStore(dataDir);
   await aiBridge.init();
 
+  const topologyStore = new TopologyStore(dataDir);
+  await topologyStore.init();
+
+  const aiMemoryStore = new AiMemoryStore(dataDir);
+  await aiMemoryStore.init();
+
+  const fonnteNotifier = new FonnteWhatsappNotifier(
+    dataDir,
+    process.env.FONNTE_TOKEN ?? '',
+    process.env.FONNTE_TARGET ?? '',
+    process.env.PING_WARN_MS ? Number(process.env.PING_WARN_MS) : undefined,
+    process.env.PING_CRIT_MS ? Number(process.env.PING_CRIT_MS) : undefined,
+  );
+  await fonnteNotifier.init();
+
+  const externalPingTargets = (process.env.PING_EXTERNAL_TARGETS ?? '1.1.1.1,8.8.8.8')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   const routers = await loadRouterInventory(routersPath);
   const approvalStore = new ApprovalGateStore(approvalsPath, 30);
   await approvalStore.init();
@@ -178,6 +294,10 @@ export async function createNocServer() {
     onPersistRouters: (nextRouters) => saveRouterInventory(routersPath, nextRouters),
     secretVault,
     aiBridge,
+    fonnteNotifier,
+    topologyStore,
+    aiMemoryStore,
+    externalPingTargets,
   });
 
   const app = express();
@@ -327,6 +447,55 @@ export async function createNocServer() {
     }
   });
 
+  app.post('/api/ping-now', writeLimiter, requireAdmin, async (_req, res) => {
+    try {
+      await orchestrator.runPingSweep();
+      res.json({ success: true, data: orchestrator.buildSnapshot() });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menjalankan test ping';
+      res.status(500).json({ success: false, error: message });
+    }
+  });
+
+  app.get('/api/alerts/settings', requireAdmin, (_req, res) => {
+    res.json({
+      success: true,
+      data: orchestrator.getAlertSettings() ?? null,
+    });
+  });
+
+  app.put('/api/alerts/settings', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const patch = AlertSettingsPatchSchema.parse(req.body ?? {});
+      const updated = await orchestrator.updateAlertSettings(patch);
+      res.json({
+        success: true,
+        data: {
+          settings: updated,
+          snapshot: orchestrator.buildSnapshot(),
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal memperbarui pengaturan alert';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/alerts/test-wa', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const { target } = TestWaSchema.parse(req.body ?? {});
+      const result = await orchestrator.sendTestWhatsapp(target);
+      if (!result.ok) {
+        res.status(400).json({ success: false, error: result.detail });
+        return;
+      }
+      res.json({ success: true, data: result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mengirim tes WhatsApp';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
   app.post('/api/routers', writeLimiter, requireAdmin, async (req, res) => {
     try {
       const input = NewRouterSchema.parse(req.body ?? {});
@@ -407,10 +576,10 @@ export async function createNocServer() {
     }
   });
 
-  app.post('/api/agents/:id/ask', writeLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/spv/ask', writeLimiter, requireAdmin, async (req, res) => {
     try {
-      const { question } = AskAgentSchema.parse(req.body ?? {});
-      const result = await orchestrator.askAgentAi(String(req.params.id), question);
+      const { question, focusRouterId } = AskAgentSchema.parse(req.body ?? {});
+      const result = await orchestrator.askSpvNoc(question, focusRouterId);
       res.json({
         success: true,
         data: {
@@ -419,7 +588,107 @@ export async function createNocServer() {
         },
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Gagal menghubungi AI agen';
+      const message = err instanceof Error ? err.message : 'Gagal menghubungi SPV NOC';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/spv/send-summary-wa', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const { target } = TestWaSchema.parse(req.body ?? {});
+      const result = await orchestrator.sendSpvSummaryWhatsapp(target);
+      if (!result.ok) {
+        res.status(400).json({ success: false, error: result.detail });
+        return;
+      }
+      res.json({
+        success: true,
+        data: {
+          ...result,
+          snapshot: orchestrator.buildSnapshot(),
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mengirim laporan SPV ke WA';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  // --- Interactive Manual Fiber Topology CRUD ---
+  app.post('/api/topology/links', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const input = NewTopologyLinkSchema.parse(req.body ?? {});
+      const link = await orchestrator.addTopologyLink(input);
+      res.status(201).json({
+        success: true,
+        data: { link, snapshot: orchestrator.buildSnapshot() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menambahkan kabel topologi';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.delete('/api/topology/links/:id', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      await orchestrator.deleteTopologyLink(String(req.params.id));
+      res.json({ success: true, data: { snapshot: orchestrator.buildSnapshot() } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menghapus kabel topologi';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.put('/api/topology/positions', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const { positions } = TopologyPositionsSchema.parse(req.body ?? {});
+      await orchestrator.saveTopologyPositions(positions);
+      res.json({ success: true, data: { snapshot: orchestrator.buildSnapshot() } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menyimpan posisi peta topologi';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  // --- Long-Term AI Learning Memory CRUD ---
+  app.post('/api/memory/facts', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const { text, topic } = NewMemoryFactSchema.parse(req.body ?? {});
+      const actor = (req as Request & { nocUser?: string }).nocUser ?? 'Admin NOC';
+      const fact = await orchestrator.addAiMemoryFact(text, actor, topic ?? 'SOP & Topologi');
+      res.status(201).json({
+        success: true,
+        data: { fact, snapshot: orchestrator.buildSnapshot() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menyimpan memori AI';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.delete('/api/memory/facts/:id', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      await orchestrator.deleteAiMemoryFact(String(req.params.id));
+      res.json({ success: true, data: { snapshot: orchestrator.buildSnapshot() } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menghapus memori AI';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/agents/:id/ask', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const { question } = AskAgentSchema.parse(req.body ?? {});
+      const result = await orchestrator.askSpvNoc(question, String(req.params.id));
+      res.json({
+        success: true,
+        data: {
+          ...result,
+          snapshot: orchestrator.buildSnapshot(),
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menghubungi SPV NOC';
       res.status(400).json({ success: false, error: message });
     }
   });
@@ -514,11 +783,13 @@ export async function createNocServer() {
 }
 
 if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/')}`) {
+  process.on('unhandledRejection', (reason) => {
+    console.error('[AI-NOC] Unhandled promise rejection (ditahan agar layanan tetap hidup):', reason);
+  });
   const httpPort = Number(process.env.PORT ?? '8090');
   createNocServer()
     .then(async ({ server, orchestrator, syslogServer, syslogPort, staticDir, shutdown }) => {
       await syslogServer.start();
-      await orchestrator.start(Number(process.env.POLL_INTERVAL_MS ?? '15000'));
       server.listen(httpPort, '0.0.0.0', () => {
         console.log(`[AI-NOC] HTTP, Web UI & WebSocket server aktif di 0.0.0.0:${httpPort}`);
         console.log(`[AI-NOC] MikroTik Syslog UDP receiver aktif di 0.0.0.0:${syslogPort}`);
@@ -526,6 +797,8 @@ if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/')}`) {
           console.log(`[AI-NOC] Menyajikan Kantor 3D statis dari: ${staticDir}`);
         }
       });
+      // Start live polling & ping loops right after HTTP port binds (eliminates startup 502 delay)
+      void orchestrator.start(Number(process.env.POLL_INTERVAL_MS ?? '3000'));
 
       const handleSignal = (sig: string) => {
         console.log(`[AI-NOC] Menerima ${sig}, menutup layanan secara bersih…`);

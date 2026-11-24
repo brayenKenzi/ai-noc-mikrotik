@@ -1,6 +1,8 @@
-import { RouterOsClient, type RouterOsCommandOutcome } from './routerosClient.js';
-import { isRadiusTimeoutMessage } from './syslogReceiver.js';
-import type { InterfaceMetric, RouterDevice, RouterHealthStatus, RouterTelemetry, SyslogEntry } from './types.js';
+import { RouterOsClient, RouterOsSessionPool, type RouterOsCommandOutcome } from './routerosClient.js';
+import { isRadiusTimeoutMessage, parseHotspotFailedLogin } from './syslogReceiver.js';
+import { parseRouterOsPingRows, type PingThresholds } from './pingMonitor.js';
+import { resolveRouterDutyProfile } from './linkWatchdog.js';
+import type { InterfaceMetric, PingMetric, RouterDevice, RouterHealthStatus, RouterTelemetry, SyslogEntry } from './types.js';
 
 interface CounterSample {
   readonly rxByte: number;
@@ -8,7 +10,17 @@ interface CounterSample {
   readonly timestampMs: number;
 }
 
+interface RouterPollCache {
+  tick: number;
+  temperatureC: number | null;
+  voltageV: number | null;
+  bgpPeersEstablished: number;
+  bgpPeersTotal: number;
+}
+
 const interfaceCounterCache = new Map<string, CounterSample>();
+const secondaryPollCache = new Map<string, RouterPollCache>();
+export const sharedRouterOsPool = new RouterOsSessionPool();
 
 export function computeHealthStatus(
   reachable: boolean,
@@ -34,7 +46,6 @@ export function parseSystemHealth(rows: readonly Record<string, string>[]): {
   let voltageV: number | null = null;
 
   for (const row of rows) {
-    // RouterOS v7 format: { name: 'temperature' | 'cpu-temperature' | 'voltage', value: '45' }
     const metricName = (row.name ?? '').toLowerCase();
     if (metricName && row.value !== undefined) {
       const parsedVal = Number.parseFloat(row.value);
@@ -48,7 +59,6 @@ export function parseSystemHealth(rows: readonly Record<string, string>[]): {
       continue;
     }
 
-    // RouterOS v6 format: single row { temperature: '42', 'cpu-temperature': '44', voltage: '24.1' }
     const rawTemp = row.temperature ?? row['cpu-temperature'];
     if (rawTemp !== undefined && temperatureC === null) {
       const t = Number.parseFloat(rawTemp);
@@ -127,41 +137,41 @@ export function parseRouterApiLogs(
     .filter((row) => {
       const msg = (row.message ?? '').trim();
       if (!msg) return false;
-      // Filter noisy self-polling API login/logout entries so real RADIUS/PPPoE/error logs stand out
       const lower = msg.toLowerCase();
       if (lower.includes(`user ${selfUser} logged`) && lower.includes('via api')) {
         return false;
       }
       return true;
     })
-    .slice(-40)
+    .slice(-60)
     .reverse();
   const nowIso = new Date().toISOString();
 
   return recentRows.map((row) => {
-      const message = (row.message ?? '').trim();
-      const rawTopics = (row.topics ?? 'system').toLowerCase().split(',').filter(Boolean);
-      let severity: SyslogEntry['severity'] = 'info';
-      if (isRadiusTimeoutMessage(message) || rawTopics.includes('critical')) {
-        severity = 'critical';
-      } else if (rawTopics.includes('error')) {
-        severity = 'error';
-      } else if (rawTopics.includes('warning')) {
-        severity = 'warning';
-      }
+    const message = (row.message ?? '').trim();
+    const rawTopics = (row.topics ?? 'system').toLowerCase().split(',').filter(Boolean);
+    const topics = rawTopics.length > 0 ? rawTopics : ['system'];
+    let severity: SyslogEntry['severity'] = 'info';
+    if (isRadiusTimeoutMessage(message) || rawTopics.includes('critical')) {
+      severity = 'critical';
+    } else if (rawTopics.includes('error') || parseHotspotFailedLogin({ topics, message }) !== null) {
+      severity = 'error';
+    } else if (rawTopics.includes('warning')) {
+      severity = 'warning';
+    }
 
-      const idKey = row['.id'] ?? '';
-      const timeKey = row.time ?? '';
-      return {
-        id: `api:${router.id}:${idKey}:${timeKey}:${message.slice(0, 48)}`,
-        routerId: router.id,
-        sourceIp: router.host,
-        timestamp: nowIso,
-        topics: rawTopics.length > 0 ? rawTopics : ['system'],
-        severity,
-        message: timeKey ? `[${timeKey}] ${message}` : message,
-      };
-    });
+    const idKey = row['.id'] ?? '';
+    const timeKey = row.time ?? '';
+    return {
+      id: `api:${router.id}:${idKey}:${timeKey}:${message.slice(0, 48)}`,
+      routerId: router.id,
+      sourceIp: router.host,
+      timestamp: nowIso,
+      topics,
+      severity,
+      message: timeKey ? `[${timeKey}] ${message}` : message,
+    };
+  });
 }
 
 export interface RouterPollResult {
@@ -174,7 +184,7 @@ export async function pollRouterTelemetry(
   forceLive = false,
   resolvedSecret?: string,
 ): Promise<RouterTelemetry> {
-  const res = await pollRouterWithLogs(router, forceLive, resolvedSecret);
+  const res = await pollRouterWithLogs(router, forceLive, resolvedSecret, forceLive);
   return res.telemetry;
 }
 
@@ -182,6 +192,7 @@ export async function pollRouterWithLogs(
   router: RouterDevice,
   forceLive = false,
   resolvedSecret?: string,
+  oneShotTest = false,
 ): Promise<RouterPollResult> {
   if (router.simulated && !forceLive) {
     return { telemetry: generateSimulatedTelemetry(router), apiLogs: [] };
@@ -203,6 +214,9 @@ export async function pollRouterWithLogs(
         temperatureC: null,
         voltageV: null,
         activePppoeCount: 0,
+        activeHotspotCount: 0,
+        hotspotHostCount: 0,
+        dhcpLeaseCount: 0,
         bgpPeersEstablished: 0,
         bgpPeersTotal: 0,
         interfaces: [],
@@ -213,14 +227,19 @@ export async function pollRouterWithLogs(
     };
   }
 
-  const client = new RouterOsClient({
+  const connOpts = {
     host: router.host,
     port: router.port,
     useTls: router.useTls,
     username: router.readUsername,
     secret,
     timeoutMs: 5000,
-  });
+  };
+
+  const prevCache = secondaryPollCache.get(router.id);
+  const tick = (prevCache?.tick ?? 0) + 1;
+  // Pull heavier health/BGP/log queries on first poll, one-shot test, or every 3rd fast tick (~9s)
+  const includeSecondary = oneShotTest || !prevCache || tick % 3 === 1;
 
   try {
     const bgpCommand =
@@ -229,12 +248,19 @@ export async function pollRouterWithLogs(
       ['/system/resource/print'],
       ['/interface/print'],
       ['/ppp/active/print', '=count-only='],
-      ['/system/health/print'],
-      bgpCommand,
-      ['/log/print'],
+      ['/ip/hotspot/active/print', '=count-only='],
+      ['/ip/hotspot/host/print', '=count-only='],
+      ['/ip/dhcp-server/lease/print', '=count-only='],
     ];
-    const outcomes = await client.connectAndRunTolerant(commands);
-    const [resOut, ifaceOut, pppOut, healthOut, bgpOut, logOut] = outcomes;
+    if (includeSecondary) {
+      commands.push(['/system/health/print'], bgpCommand, ['/log/print']);
+    }
+
+    const outcomes = oneShotTest
+      ? await new RouterOsClient(connOpts).connectAndRunTolerant(commands)
+      : await sharedRouterOsPool.runTolerant(router.id, connOpts, commands);
+
+    const [resOut, ifaceOut, pppOut, hsActiveOut, hsHostOut, dhcpOut, healthOut, bgpOut, logOut] = outcomes;
 
     const res = resOut?.ok ? (resOut.rows[0] ?? {}) : {};
     const cpuLoadPercent = Number(res['cpu-load'] ?? '0');
@@ -263,12 +289,41 @@ export async function pollRouterWithLogs(
           txMbps,
         };
       });
-    const interfaces = sortInterfaces(rawInterfaces).slice(0, 28);
+    const dutyProfile = resolveRouterDutyProfile(router);
+    const watchedSet = new Set(dutyProfile.watchedInterfaces.map((n) => n.toLowerCase()));
+    const sortedAll = sortInterfaces(rawInterfaces);
+    const watchedFirst = sortedAll.filter((i) => watchedSet.has(i.name.toLowerCase()));
+    const restIfaces = sortedAll.filter((i) => !watchedSet.has(i.name.toLowerCase()));
+    const interfaces = [...watchedFirst, ...restIfaces].slice(0, Math.max(28, watchedFirst.length + 20));
 
     const activePppoeCount = parsePppActiveCount(pppOut);
-    const { temperatureC, voltageV } = parseSystemHealth(healthOut?.ok ? healthOut.rows : []);
-    const bgp = parseBgpPeerStats(bgpOut);
-    const apiLogs = logOut?.ok ? parseRouterApiLogs(router, logOut.rows) : [];
+    const activeHotspotCount = parsePppActiveCount(hsActiveOut);
+    const hotspotHostCount = parsePppActiveCount(hsHostOut);
+    const dhcpLeaseCount = parsePppActiveCount(dhcpOut);
+
+    let temperatureC = prevCache?.temperatureC ?? null;
+    let voltageV = prevCache?.voltageV ?? null;
+    let bgpPeersEstablished = prevCache?.bgpPeersEstablished ?? 0;
+    let bgpPeersTotal = prevCache?.bgpPeersTotal ?? 0;
+
+    if (includeSecondary) {
+      const health = parseSystemHealth(healthOut?.ok ? healthOut.rows : []);
+      temperatureC = health.temperatureC;
+      voltageV = health.voltageV;
+      const bgp = parseBgpPeerStats(bgpOut);
+      bgpPeersEstablished = bgp.established;
+      bgpPeersTotal = bgp.total;
+    }
+
+    secondaryPollCache.set(router.id, {
+      tick,
+      temperatureC,
+      voltageV,
+      bgpPeersEstablished,
+      bgpPeersTotal,
+    });
+
+    const apiLogs = includeSecondary && logOut?.ok ? parseRouterApiLogs(router, logOut.rows) : [];
 
     return {
       telemetry: {
@@ -283,8 +338,11 @@ export async function pollRouterWithLogs(
         temperatureC,
         voltageV,
         activePppoeCount,
-        bgpPeersEstablished: bgp.established,
-        bgpPeersTotal: bgp.total,
+        activeHotspotCount,
+        hotspotHostCount,
+        dhcpLeaseCount,
+        bgpPeersEstablished,
+        bgpPeersTotal,
         interfaces,
         status: computeHealthStatus(true, cpuLoadPercent, memoryUsedPercent, temperatureC),
       },
@@ -305,6 +363,9 @@ export async function pollRouterWithLogs(
         temperatureC: null,
         voltageV: null,
         activePppoeCount: 0,
+        activeHotspotCount: 0,
+        hotspotHostCount: 0,
+        dhcpLeaseCount: 0,
         bgpPeersEstablished: 0,
         bgpPeersTotal: 0,
         interfaces: [],
@@ -312,6 +373,77 @@ export async function pollRouterWithLogs(
         lastError: message,
       },
       apiLogs: [],
+    };
+  }
+}
+
+/**
+ * Executes an ICMP ping FROM INSIDE the MikroTik router out through a specific interface
+ * (e.g., CORE MONGKONAI `/ping address=1.1.1.1 interface=vlan2000-CMK count=4`)
+ * using the existing persistent 1x-login session pool (zero repeated logins!).
+ */
+export async function pollRouterInterfacePing(
+  router: RouterDevice,
+  resolvedSecret: string | undefined,
+  thresholds: PingThresholds,
+): Promise<PingMetric | null> {
+  if (router.simulated) return null;
+  const profile = resolveRouterDutyProfile(router);
+  const cfg = profile.interfacePing;
+  if (!cfg || !cfg.interfaceName.trim() || !cfg.target.trim()) return null;
+
+  // Validate interface & target defensively before sending to RouterOS API
+  if (!/^[a-zA-Z0-9._:/\s-]+$/.test(cfg.interfaceName) || !/^[a-zA-Z0-9._:-]+$/.test(cfg.target)) {
+    return null;
+  }
+
+  const secret =
+    (resolvedSecret !== undefined && resolvedSecret !== '' ? resolvedSecret : process.env[router.readSecretEnv]) ?? '';
+  if (!secret) return null;
+
+  const connOpts = {
+    host: router.host,
+    port: router.port,
+    useTls: router.useTls,
+    username: router.readUsername,
+    secret,
+    timeoutMs: 9000,
+  };
+
+  const label = `${cfg.interfaceName} → ${cfg.target}`;
+  const effectiveThresholds: PingThresholds = {
+    warnMs: cfg.warnMs ?? thresholds.warnMs,
+    critMs: cfg.critMs ?? thresholds.critMs,
+    lossCritPct: thresholds.lossCritPct,
+  };
+
+  try {
+    const [outcome] = await sharedRouterOsPool.runTolerant(router.id, connOpts, [
+      ['/ping', `=address=${cfg.target.trim()}`, `=interface=${cfg.interfaceName.trim()}`, '=count=4'],
+    ]);
+    if (!outcome || !outcome.ok) {
+      return {
+        target: cfg.target,
+        label,
+        minMs: null,
+        avgMs: null,
+        maxMs: null,
+        packetLossPercent: 100,
+        status: 'down',
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    return parseRouterOsPingRows(outcome.rows, cfg.target, label, effectiveThresholds);
+  } catch {
+    return {
+      target: cfg.target,
+      label,
+      minMs: null,
+      avgMs: null,
+      maxMs: null,
+      packetLossPercent: 100,
+      status: 'down',
+      updatedAt: new Date().toISOString(),
     };
   }
 }
@@ -331,13 +463,16 @@ function generateSimulatedTelemetry(router: RouterDevice): RouterTelemetry {
     timestamp: new Date().toISOString(),
     reachable: true,
     uptime: '18d 06:42:10',
-    version: router.routerOsVersion === 'v7' ? '7.16.2 (stable)' : '6.49.17 (long-term)',
-    boardName: isCcr ? 'CCR2116-12G-4S+' : isCrs ? 'CRS326-24S+2Q+RM' : 'RB750Gr3',
+    version: router.routerOsVersion === 'v7' ? '7.18.2 (stable)' : '6.49.17 (long-term)',
+    boardName: isCcr ? 'CCR2004-16G-2S+' : isCrs ? 'CRS326-24S+2Q+RM' : 'RB750Gr3',
     cpuLoadPercent,
     memoryUsedPercent,
     temperatureC,
     voltageV: isCrs ? 24.4 : isCcr ? 24.1 : 23.8,
-    activePppoeCount: router.role === 'bras' ? 485 : router.role === 'branch' ? 74 : 0,
+    activePppoeCount: router.role === 'bras' ? 350 : router.role === 'branch' ? 52 : 0,
+    activeHotspotCount: router.role === 'bras' ? 42 : router.role === 'branch' ? 14 : 0,
+    hotspotHostCount: router.role === 'bras' ? 58 : router.role === 'branch' ? 19 : 0,
+    dhcpLeaseCount: router.role === 'bras' ? 120 : router.role === 'branch' ? 35 : 0,
     bgpPeersEstablished: router.role === 'core' ? 2 : router.role === 'bras' ? 3 : 0,
     bgpPeersTotal: router.role === 'core' ? 2 : router.role === 'bras' ? 3 : 0,
     interfaces: isCrs
@@ -348,8 +483,8 @@ function generateSimulatedTelemetry(router: RouterDevice): RouterTelemetry {
         ]
       : isCcr
         ? [
-            { name: 'sfp-sfpplus1-ISP', running: true, disabled: false, rxMbps: 1120.4, txMbps: 315.2 },
-            { name: 'sfp-sfpplus2-OLT-MomoNet', running: true, disabled: false, rxMbps: 298.5, txMbps: 1084.6 },
+            { name: 'ether1-UPLINK', running: true, disabled: false, rxMbps: 450.4, txMbps: 34.2 },
+            { name: 'bridge-OLT', running: true, disabled: false, rxMbps: 26.5, txMbps: 342.6 },
             { name: 'ether1-Mgmt', running: true, disabled: false, rxMbps: 8.4, txMbps: 3.9 },
           ]
         : [

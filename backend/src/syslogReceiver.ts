@@ -75,6 +75,38 @@ export function isRadiusTimeoutMessage(message: string): boolean {
   return parseRadiusTimeoutUser(message) !== null;
 }
 
+/**
+ * Extracts username from MikroTik Hotspot / PPPoE login failure log lines, e.g.:
+ * - "user123 (192.168.81.5): login failed: invalid username or password"
+ * - "user123 (10.5.50.12): login failed: no more sessions are allowed for user"
+ * - "<0fea>: user \"pelanggan\" authentication failed - radius timeout"
+ */
+export function parseHotspotFailedLogin(entry: Pick<SyslogEntry, 'topics' | 'message'>): string | null {
+  const msg = entry.message;
+  const lower = msg.toLowerCase();
+  const isAuthFail =
+    lower.includes('login failed') ||
+    lower.includes('authentication failed') ||
+    lower.includes('invalid username or password') ||
+    lower.includes('no more sessions are allowed') ||
+    lower.includes('simultaneous session limit');
+  if (!isAuthFail) return null;
+
+  // Skip router admin ssh/winbox brute-force lines (those belong to system login failure, not hotspot users)
+  if (lower.includes('login failure for user') && (lower.includes('via ssh') || lower.includes('via winbox'))) {
+    return null;
+  }
+
+  const stripped = msg.replace(/^\[[^\]]+\]\s*/, '');
+  const hsUserMatch = /^([^\s:(<>]+)\s*\([^)]+\)\s*:\s*login failed/i.exec(stripped);
+  if (hsUserMatch?.[1]) return hsUserMatch[1];
+
+  const quotedUser = /user\s+"?([^"\s<>]+)"?/i.exec(stripped);
+  if (quotedUser?.[1]) return quotedUser[1];
+
+  return 'unknown';
+}
+
 export function isAnomalySyslog(entry: SyslogEntry): boolean {
   const msg = entry.message.toLowerCase();
   if (isRadiusTimeoutMessage(entry.message)) {

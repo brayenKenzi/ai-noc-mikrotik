@@ -10,8 +10,24 @@ import {
   parseSentenceAttributes,
   evaluateLoginReply,
 } from '../src/routerosClient.js';
-import { parseMikrotikSyslog, isAnomalySyslog, parseRadiusTimeoutUser } from '../src/syslogReceiver.js';
-import { validateAndBuildPlaybook } from '../src/playbooks.js';
+import {
+  parseMikrotikSyslog,
+  isAnomalySyslog,
+  parseRadiusTimeoutUser,
+  parseHotspotFailedLogin,
+} from '../src/syslogReceiver.js';
+import { parsePingOutput, parseRouterOsPingRows, parseRouterOsRttMs } from '../src/pingMonitor.js';
+import { FonnteWhatsappNotifier } from '../src/fonnteNotifier.js';
+import { LinkWatchdogEngine, resolveRouterDutyProfile } from '../src/linkWatchdog.js';
+import { TopologyStore } from '../src/topologyStore.js';
+import { PppoeMassDisconnectWatchdog } from '../src/pppoeWatchdog.js';
+import { AiMemoryStore, detectTeachingFact } from '../src/aiMemoryStore.js';
+import {
+  executeApprovedProposal,
+  hasWriteCredentialsForRouter,
+  resolveWriteCredentials,
+  validateAndBuildPlaybook,
+} from '../src/playbooks.js';
 import { ApprovalGateStore } from '../src/approvalStore.js';
 import { deterministicDiagnosis } from '../src/aiAgent.js';
 import { DEFAULT_ROUTERS, loadRouterInventory, saveRouterInventory } from '../src/inventory.js';
@@ -28,7 +44,13 @@ import {
 import { NocOrchestrator } from '../src/orchestrator.js';
 import { SecretVault } from '../src/secretVault.js';
 import { AdminAuthManager } from '../src/auth.js';
-import { AntigravityBridgeStore, buildDeterministicLiveReply } from '../src/antigravityBridge.js';
+import {
+  AntigravityBridgeStore,
+  buildDeterministicLiveReply,
+  buildDeterministicSpvReply,
+  buildSpvWhatsappSummary,
+  sanitizePlainAiText,
+} from '../src/antigravityBridge.js';
 
 describe('RouterOS v6/v7 Binary Protocol Codec & Auth Evaluation', () => {
   it('encodes and decodes sentences round-trip accurately', () => {
@@ -374,32 +396,455 @@ describe('Human-in-the-Loop Approval Store & Deterministic Agent Diagnosis', () 
     assert.equal(state?.linked, true);
 
     const ccr = DEFAULT_ROUTERS.find((r) => r.id === 'ccr-momonet-pusat')!;
-    const reply = buildDeterministicLiveReply(
-      ccr,
-      {
-        routerId: ccr.id,
-        timestamp: new Date().toISOString(),
-        reachable: true,
-        uptime: '1w5d',
-        version: '7.18.2',
-        boardName: 'CCR2004-16G-2S+',
-        cpuLoadPercent: 31,
-        memoryUsedPercent: 14,
-        temperatureC: 58,
-        voltageV: null,
-        activePppoeCount: 350,
-        bgpPeersEstablished: 0,
-        bgpPeersTotal: 0,
-        interfaces: [{ name: 'ether1-UP LINK', running: true, disabled: false, rxMbps: 473.1, txMbps: 26.8 }],
-        status: 'healthy',
+    const tel = {
+      routerId: ccr.id,
+      timestamp: new Date().toISOString(),
+      reachable: true,
+      uptime: '1w5d',
+      version: '7.18.2',
+      boardName: 'CCR2004-16G-2S+',
+      cpuLoadPercent: 31,
+      memoryUsedPercent: 14,
+      temperatureC: 58,
+      voltageV: null,
+      activePppoeCount: 350,
+      activeHotspotCount: 28,
+      hotspotHostCount: 41,
+      dhcpLeaseCount: 95,
+      bgpPeersEstablished: 0,
+      bgpPeersTotal: 0,
+      interfaces: [{ name: 'ether1-UP LINK', running: true, disabled: false, rxMbps: 473.1, txMbps: 26.8 }],
+      ping: {
+        target: ccr.host,
+        label: ccr.name,
+        minMs: 0.7,
+        avgMs: 0.9,
+        maxMs: 1.2,
+        packetLossPercent: 0,
+        status: 'ok' as const,
+        updatedAt: new Date().toISOString(),
       },
-      [],
-      [],
-      'cek trafik uplink',
-    );
+      status: 'healthy' as const,
+    };
+
+    const reply = buildDeterministicLiveReply(ccr, tel, [], [], 'cek trafik uplink');
     assert.ok(reply.includes('ether1-UP LINK'));
     assert.ok(reply.includes('473.1'));
 
+    // Ensure "login" in Hotspot question NEVER falsely triggers the RADIUS/log branch!
+    const hsLogs = [
+      {
+        id: 'hs1',
+        routerId: ccr.id,
+        sourceIp: ccr.host,
+        timestamp: new Date().toISOString(),
+        topics: ['hotspot', 'info', 'debug'],
+        severity: 'error' as const,
+        message: 'voucher99 (10.5.50.14): login failed: invalid username or password',
+      },
+    ];
+    const hsReply = buildDeterministicLiveReply(
+      ccr,
+      tel,
+      [],
+      hsLogs,
+      'ada berapa user hotspot yang tidak bisa login?',
+    );
+    assert.ok(hsReply.includes('User Hotspot Aktif: 28'));
+    assert.ok(hsReply.includes('Gagal Login Hotspot di Log: 1'));
+    assert.ok(hsReply.includes('voucher99'));
+    assert.ok(!hsReply.includes('Status RADIUS'));
+
+    // Ensure Ping question returns both router ping and external DNS ping
+    const pingReply = buildDeterministicLiveReply(
+      ccr,
+      tel,
+      [],
+      [],
+      'cek ping sekarang apakah membengkak?',
+      [
+        {
+          target: '1.1.1.1',
+          label: 'Cloudflare DNS',
+          minMs: 12.1,
+          avgMs: 14.5,
+          maxMs: 18.2,
+          packetLossPercent: 0,
+          status: 'ok',
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    );
+    assert.ok(pingReply.includes('0.9 ms'));
+    assert.ok(pingReply.includes('1.1.1.1'));
+    assert.ok(pingReply.includes('14.5 ms'));
+
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('parses Linux/Windows ping outputs, detects Hotspot failed logins, and persists Fonnte settings', async () => {
+    const thresholds = { warnMs: 50, critMs: 100, lossCritPct: 20 };
+
+    const linuxOk = `3 packets transmitted, 3 received, 0% packet loss, time 502ms\nrtt min/avg/max/mdev = 11.201/12.460/13.800/0.912 ms`;
+    const p1 = parsePingOutput(linuxOk, '1.1.1.1', 'Cloudflare DNS', thresholds);
+    assert.equal(p1.status, 'ok');
+    assert.equal(p1.avgMs, 12.5);
+    assert.equal(p1.packetLossPercent, 0);
+
+    const linuxSpike = `3 packets transmitted, 3 received, 0% packet loss, time 502ms\nrtt min/avg/max/mdev = 95.0/132.4/180.2/12.1 ms`;
+    const p2 = parsePingOutput(linuxSpike, '8.8.8.8', 'Google DNS', thresholds);
+    assert.equal(p2.status, 'critical');
+    assert.equal(p2.avgMs, 132.4);
+
+    const winHigh = `Packets: Sent = 3, Received = 3, Lost = 0 (0% loss),\nMinimum = 55ms, Maximum = 78ms, Average = 64ms`;
+    const p3 = parsePingOutput(winHigh, '192.168.88.1', 'Router', thresholds);
+    assert.equal(p3.status, 'high');
+    assert.equal(p3.avgMs, 64);
+
+    const rto = `3 packets transmitted, 0 received, 100% packet loss, time 2050ms`;
+    const p4 = parsePingOutput(rto, '192.168.88.99', 'DownRouter', thresholds);
+    assert.equal(p4.status, 'down');
+    assert.equal(p4.packetLossPercent, 100);
+
+    // Hotspot failed login parser
+    const hsFail = parseHotspotFailedLogin({
+      topics: ['hotspot', 'info'],
+      message: '[11:20:01] tamu_07 (10.5.50.22): login failed: invalid username or password',
+    });
+    assert.equal(hsFail, 'tamu_07');
+    assert.equal(
+      parseHotspotFailedLogin({
+        topics: ['system', 'error'],
+        message: 'login failure for user admin from 185.220.101.9 via ssh',
+      }),
+      null,
+    );
+
+    // Fonnte settings store
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'noc-fonnte-test-'));
+    const notifier = new FonnteWhatsappNotifier(tmpDir, '', '081200000000', 45, 95);
+    await notifier.init();
+    assert.equal(notifier.getSettings().pingWarnMs, 45);
+    await notifier.updateSettings({ pingWarnMs: 60, waTarget: '081399998888' });
+
+    const reloaded = new FonnteWhatsappNotifier(tmpDir, '', '');
+    await reloaded.init();
+    assert.equal(reloaded.getSettings().pingWarnMs, 60);
+    assert.equal(reloaded.getSettings().waTarget, '081399998888');
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('powers centralized SPV NOC across all routers and formats WA fleet summary', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'noc-spv-test-'));
+    const store = new ApprovalGateStore(path.join(tmpDir, 'approvals.json'), 30);
+    await store.init();
+    const bridge = new AntigravityBridgeStore(tmpDir);
+    await bridge.init();
+
+    const orchestrator = new NocOrchestrator({
+      routers: DEFAULT_ROUTERS,
+      approvalStore: store,
+      nocServerIp: '192.168.88.10',
+      telegramToken: '',
+      telegramChatId: '',
+      onBroadcast: () => {},
+      aiBridge: bridge,
+    });
+    await orchestrator.pollAllRouters();
+    const snap = orchestrator.buildSnapshot();
+    assert.equal(snap.spvNoc.id, 'spv-noc');
+    assert.equal(snap.spvNoc.name, 'SPV NOC');
+    assert.equal(snap.spvNoc.totalRouters, 9);
+
+    const spvHsReply = buildDeterministicSpvReply(snap.agents, [], [], 'cek total user hotspot semua router');
+    assert.ok(spvHsReply.includes('SPV NOC'));
+    assert.ok(spvHsReply.includes('Hotspot Aktif'));
+
+    const waSummary = buildSpvWhatsappSummary(snap.agents, [], []);
+    assert.ok(waSummary.includes('LAPORAN RINGKAS SPV NOC'));
+
+    // Plain-text sanitizer must remove ALL asterisks and uppercase bold/headings cleanly
+    const messyMd = `### Laporan Jaringan\n* **CCR-Pusat**: *CPU 31%* dan \`140\` user\n* **Status**: Aman*`;
+    const clean = sanitizePlainAiText(messyMd);
+    assert.ok(!clean.includes('*'));
+    assert.ok(!clean.includes('`'));
+    assert.ok(clean.includes('LAPORAN JARINGAN'));
+    assert.ok(clean.includes('• CCR-PUSAT: CPU 31% dan 140 user'));
+    assert.ok(clean.includes('• STATUS: Aman'));
+
+    // Anti-spam filter verification: daily report only 1x/day & critical ping needs 3x consecutive checks!
+    const notifier = new FonnteWhatsappNotifier(tmpDir, 'dummy-token', '081200000000');
+    await notifier.init();
+    const sentMessages: string[] = [];
+    // Stub sendRaw so no real HTTP call happens in unit tests
+    (notifier as unknown as { sendRaw: (t: string, m: string) => Promise<{ ok: boolean; detail: string }> }).sendRaw =
+      async (_t, m) => {
+        sentMessages.push(m);
+        return { ok: true, detail: 'mocked' };
+      };
+
+    const morningBefore = new Date(2026, 10, 24, 7, 30, 0);
+    const morningDue = new Date(2026, 10, 24, 8, 5, 0);
+    assert.equal(notifier.shouldSendDailyReport(morningBefore), false);
+    assert.equal(notifier.shouldSendDailyReport(morningDue), true);
+    await notifier.markDailyReportSent(morningDue);
+    // Must NEVER send a second daily report on the same day!
+    assert.equal(notifier.shouldSendDailyReport(new Date(2026, 10, 24, 21, 0, 0)), false);
+
+    const orchWithWa = new NocOrchestrator({
+      routers: DEFAULT_ROUTERS,
+      approvalStore: store,
+      nocServerIp: '192.168.88.10',
+      telegramToken: '',
+      telegramChatId: '',
+      onBroadcast: () => {},
+      fonnteNotifier: notifier,
+    });
+    const th = { warnMs: 80, critMs: 150, lossCritPct: 40 };
+    const highPing = {
+      target: '1.1.1.1',
+      label: 'Cloudflare DNS',
+      minMs: 70,
+      avgMs: 92,
+      maxMs: 110,
+      packetLossPercent: 0,
+      status: 'high' as const,
+      updatedAt: new Date().toISOString(),
+    };
+    const critPing = {
+      target: '1.1.1.1',
+      label: 'Cloudflare DNS',
+      minMs: 160,
+      avgMs: 210,
+      maxMs: 260,
+      packetLossPercent: 40,
+      status: 'critical' as const,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Warning ('high') ping must NEVER send WA
+    await orchWithWa.evaluatePingWhatsappAlert('ping:ext:1.1.1.1', 'spv-noc', 'Internet', 'SPV', highPing, th);
+    await orchWithWa.evaluatePingWhatsappAlert('ping:ext:1.1.1.1', 'spv-noc', 'Internet', 'SPV', highPing, th);
+    await orchWithWa.evaluatePingWhatsappAlert('ping:ext:1.1.1.1', 'spv-noc', 'Internet', 'SPV', highPing, th);
+    assert.equal(sentMessages.length, 0);
+
+    // Critical ping 1x & 2x (transient glitch) must NOT send WA yet; 3rd consecutive check sends 1 WA!
+    assert.equal(
+      await orchWithWa.evaluatePingWhatsappAlert('ping:ext:1.1.1.1', 'spv-noc', 'Internet', 'SPV', critPing, th),
+      false,
+    );
+    assert.equal(
+      await orchWithWa.evaluatePingWhatsappAlert('ping:ext:1.1.1.1', 'spv-noc', 'Internet', 'SPV', critPing, th),
+      false,
+    );
+    assert.equal(sentMessages.length, 0);
+    assert.equal(
+      await orchWithWa.evaluatePingWhatsappAlert('ping:ext:1.1.1.1', 'spv-noc', 'Internet', 'SPV', critPing, th),
+      true,
+    );
+    assert.equal(sentMessages.length, 1);
+    assert.ok(!sentMessages[0]!.includes('*'));
+
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('parses RouterOS v6/v7 /ping rows and detects Link Down & vlan2000-CMK traffic drop accurately', () => {
+    // RouterOS v6 & v7 RTT parsing
+    assert.equal(parseRouterOsRttMs('41ms'), 41);
+    assert.equal(parseRouterOsRttMs('41ms359us'), 41.4);
+    assert.equal(parseRouterOsRttMs('860us'), 0.9);
+    assert.equal(parseRouterOsRttMs('1s20ms'), 1020);
+
+    const parsedPing = parseRouterOsPingRows(
+      [
+        { seq: '0', host: '1.1.1.1', time: '41ms', sent: '1', received: '1', 'packet-loss': '0', 'min-rtt': '41ms', 'avg-rtt': '41ms', 'max-rtt': '41ms' },
+        { seq: '1', host: '1.1.1.1', time: '42ms500us', sent: '2', received: '2', 'packet-loss': '0', 'min-rtt': '41ms', 'avg-rtt': '41ms750us', 'max-rtt': '42ms500us' },
+      ],
+      '1.1.1.1',
+      'vlan2000-CMK → 1.1.1.1',
+      { warnMs: 80, critMs: 140, lossCritPct: 40 },
+    );
+    assert.equal(parsedPing.status, 'ok');
+    assert.equal(parsedPing.avgMs, 41.8);
+    assert.equal(parsedPing.packetLossPercent, 0);
+
+    // Role profile defaults for CORE MONGKONAI and Bima CRS-BB01
+    const coreM = DEFAULT_ROUTERS.find((r) => r.id === 'core-mongkonai')!;
+    const coreProfile = resolveRouterDutyProfile(coreM);
+    assert.equal(coreProfile.dutyRole, 'core_vlan_watchdog');
+    assert.ok(coreProfile.watchedInterfaces.includes('vlan2000-CMK'));
+    assert.equal(coreProfile.interfacePing?.interfaceName, 'vlan2000-CMK');
+    assert.equal(coreProfile.interfacePing?.target, '1.1.1.1');
+
+    const bima = DEFAULT_ROUTERS.find((r) => r.id === 'crs-backbone-01')!;
+    const bimaProfile = resolveRouterDutyProfile(bima);
+    assert.equal(bimaProfile.dutyRole, 'backbone_master');
+
+    // Traffic drop watchdog on vlan2000-CMK (needs baseline >= 6 samples, then 5x sustained drop -> fires once!)
+    const watchdog = new LinkWatchdogEngine();
+    for (let i = 0; i < 8; i++) {
+      const { events } = watchdog.evaluateRouterInterfaces(coreM, [
+        { name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 120, txMbps: 80 },
+      ]);
+      assert.equal(events.length, 0);
+    }
+    let firedDrop = 0;
+    for (let i = 0; i < 6; i++) {
+      const { events } = watchdog.evaluateRouterInterfaces(coreM, [
+        { name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 15, txMbps: 10 },
+      ]);
+      firedDrop += events.filter((e) => e.kind === 'drop').length;
+    }
+    assert.equal(firedDrop, 1);
+
+    // Link down detection on Bima CRS-BB01 (fires on 3rd consecutive down check!)
+    watchdog.evaluateRouterInterfaces(bima, [
+      { name: 'sfp5-TO LOLAN-BANGO', running: true, disabled: false, rxMbps: 40, txMbps: 30 },
+    ]);
+    let firedDown = 0;
+    for (let i = 0; i < 4; i++) {
+      const { events } = watchdog.evaluateRouterInterfaces(bima, [
+        { name: 'sfp5-TO LOLAN-BANGO', running: false, disabled: false, rxMbps: 0, txMbps: 0 },
+      ]);
+      firedDown += events.filter((e) => e.kind === 'down').length;
+    }
+    assert.equal(firedDown, 1);
+  });
+
+  it('persists manual Fiber Topology links, detects PPPoE Mass-Disconnect, and learns from chat AI Memory', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'noc-topo-mem-test-'));
+
+    // 1. TopologyStore manual fiber cable + live status calculation
+    const topo = new TopologyStore(tmpDir);
+    await topo.init();
+    const added = await topo.addLink({
+      fromRouterId: 'core-mongkonai',
+      fromInterface: 'vlan2000-CMK',
+      toRouterId: 'ccr-momonet-pusat',
+      toInterface: 'ether1-UP LINK',
+      label: 'Suplai Utama CCR',
+      fiberType: 'vlan',
+    });
+    await topo.savePositions([{ routerId: 'core-mongkonai', x: 140, y: 240 }]);
+
+    const reloadedTopo = new TopologyStore(tmpDir);
+    await reloadedTopo.init();
+    assert.equal(reloadedTopo.getLinks().length, 1);
+    assert.equal(reloadedTopo.getPositions()[0]?.x, 140);
+
+    const telMap = new Map([
+      [
+        'core-mongkonai',
+        {
+          routerId: 'core-mongkonai',
+          timestamp: new Date().toISOString(),
+          reachable: true,
+          uptime: '5d',
+          version: '6.49',
+          boardName: 'CCR',
+          cpuLoadPercent: 20,
+          memoryUsedPercent: 20,
+          temperatureC: 45,
+          voltageV: null,
+          activePppoeCount: 0,
+          activeHotspotCount: 0,
+          hotspotHostCount: 0,
+          dhcpLeaseCount: 0,
+          bgpPeersEstablished: 0,
+          bgpPeersTotal: 0,
+          interfaces: [{ name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 420, txMbps: 40 }],
+          status: 'healthy' as const,
+        },
+      ],
+    ]);
+    const liveLinks = reloadedTopo.buildLiveLinks(DEFAULT_ROUTERS, telMap);
+    assert.equal(liveLinks[0]?.status, 'ok');
+    assert.equal(liveLinks[0]?.liveMbps, 460);
+
+    await reloadedTopo.deleteLink(added.id);
+    assert.equal(reloadedTopo.getLinks().length, 0);
+
+    // 2. PppoeMassDisconnectWatchdog (detects OLT/FO cut on 2nd consecutive poll & recovers cleanly)
+    const ccr = DEFAULT_ROUTERS.find((r) => r.id === 'ccr-momonet-pusat')!;
+    const pppWatch = new PppoeMassDisconnectWatchdog();
+    const now = Date.now();
+    assert.equal(pppWatch.evaluate(ccr, 350, [], [], 15, now), null);
+    assert.equal(pppWatch.evaluate(ccr, 348, [], [], 15, now + 3000), null);
+    // Small normal drop (3 users) -> ignored
+    assert.equal(pppWatch.evaluate(ccr, 345, [], [], 15, now + 6000), null);
+    // Sudden OLT cut: 55 users drop -> 1st poll waits confirm, 2nd poll fires mass_disconnect!
+    const downIfs = [{ name: 'ether9-OLT-GLOBAL-01', running: false, disabled: false, rxMbps: 0, txMbps: 0 }];
+    assert.equal(pppWatch.evaluate(ccr, 290, downIfs, [], 15, now + 9000), null);
+    const massEv = pppWatch.evaluate(ccr, 290, downIfs, [], 15, now + 12000);
+    assert.equal(massEv?.kind, 'mass_disconnect');
+    assert.equal(massEv?.droppedCount, 60);
+    assert.ok(massEv?.suspectedOltInterfaces.includes('ether9-OLT-GLOBAL-01'));
+    // Recovery after 3 stable polls >= 85%
+    assert.equal(pppWatch.evaluate(ccr, 340, [], [], 15, now + 15000), null);
+    assert.equal(pppWatch.evaluate(ccr, 342, [], [], 15, now + 18000), null);
+    const recEv = pppWatch.evaluate(ccr, 345, [], [], 15, now + 21000);
+    assert.equal(recEv?.kind, 'recovered');
+
+    // 3. AiMemoryStore long-term chat & teaching fact learning
+    assert.equal(
+      detectTeachingFact('Ingat ya: OLT Global 01 melayani area Mongkonai Timur'),
+      'OLT Global 01 melayani area Mongkonai Timur',
+    );
+    const mem = new AiMemoryStore(tmpDir);
+    await mem.init();
+    const { learnedFact } = await mem.recordConversation(
+      'Telegram (BrayenKenzi)',
+      'Ingat ya: OLT Global 01 melayani area Mongkonai Timur',
+      'Siap Boss, sudah saya simpan!',
+      'SPV NOC',
+    );
+    assert.ok(learnedFact);
+
+    const memReloaded = new AiMemoryStore(tmpDir);
+    await memReloaded.init();
+    assert.equal(memReloaded.getSummary().totalConversations, 1);
+    const ctx = memReloaded.retrieveRelevantContext('area mana yang dilayani OLT Global 01?');
+    assert.ok(ctx.relevantFacts.some((f) => f.text.includes('Mongkonai Timur')));
+
+    const localSpvAnswer = buildDeterministicSpvReply([], [], [], 'cek memori OLT Global 01', undefined, [], ctx);
+    assert.ok(localSpvAnswer.includes('Mongkonai Timur'));
+
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('handles Read-Only manual acknowledgment cleanly and supports central SPV write account', async () => {
+    const router = { ...DEFAULT_ROUTERS[0]!, simulated: false, execSecretEnv: 'TEST_NONEXISTENT_ROUTER_SECRET' };
+    const prevSpvUser = process.env.SPV_EXEC_USERNAME;
+    const prevSpvSecret = process.env.SPV_EXEC_SECRET;
+    delete process.env.SPV_EXEC_USERNAME;
+    delete process.env.SPV_EXEC_SECRET;
+    delete process.env.TEST_NONEXISTENT_ROUTER_SECRET;
+
+    try {
+      assert.equal(hasWriteCredentialsForRouter(router), false);
+      assert.equal(resolveWriteCredentials(router), null);
+
+      const out = await executeApprovedProposal(router, {
+        actionType: 'ENABLE_INTERFACE',
+        parameters: { interface: 'sfp2-LOLAN' },
+        previewCommand: '/interface enable "sfp2-LOLAN"',
+        rollbackCommand: '/interface disable "sfp2-LOLAN"',
+        riskLevel: 'MEDIUM',
+      });
+      assert.ok(out.includes('MODE READ-ONLY'));
+      assert.ok(out.includes('/interface enable "sfp2-LOLAN"'));
+
+      process.env.SPV_EXEC_USERNAME = 'spv_master';
+      process.env.SPV_EXEC_SECRET = 'temporary-test-only';
+      assert.equal(hasWriteCredentialsForRouter(router), true);
+      const creds = resolveWriteCredentials(router);
+      assert.equal(creds?.source, 'spv');
+      assert.equal(creds?.username, 'spv_master');
+    } finally {
+      if (prevSpvUser === undefined) delete process.env.SPV_EXEC_USERNAME;
+      else process.env.SPV_EXEC_USERNAME = prevSpvUser;
+      if (prevSpvSecret === undefined) delete process.env.SPV_EXEC_SECRET;
+      else process.env.SPV_EXEC_SECRET = prevSpvSecret;
+    }
   });
 });

@@ -2,8 +2,8 @@ import laporanAgen from './laporan.json';
 import type { GayaId } from './gaya/daftar';
 
 export const KANTOR = {
-  nama: 'Kantor AI NOC · Momo Net',
-  subjudul: '9 MikroTik Monitoring (CORE MONGKONAI, 4 CRS, CCR Pusat, 3 RB750Gr3)',
+  nama: 'Cafe Datacenter AI NOC',
+  subjudul: '1 SPV NOC AI Supervisor · Monitoring Semua MikroTik Real-Time',
 };
 
 export const GAYA: GayaId = 'datacenter';

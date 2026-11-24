@@ -1,3 +1,4 @@
+import { getGeminiModelCandidates } from './antigravityBridge.js';
 import { validateAndBuildPlaybook } from './playbooks.js';
 import { parseRadiusTimeoutUser } from './syslogReceiver.js';
 import type {
@@ -34,8 +35,10 @@ export async function analyzeRouterIncident(
   recentLogs: readonly SyslogEntry[],
   nocServerIp?: string,
 ): Promise<AgentDiagnosisResult> {
-  const geminiKey = process.env.GEMINI_API_KEY?.trim();
-  const openaiKey = process.env.LLM_API_KEY?.trim();
+  // Preserve Cloud LLM quota for interactive SPV NOC chat unless AI_AUTO_DIAGNOSIS=true is explicitly set
+  const allowAutoLlm = process.env.AI_AUTO_DIAGNOSIS === 'true';
+  const geminiKey = allowAutoLlm ? process.env.GEMINI_API_KEY?.trim() : '';
+  const openaiKey = allowAutoLlm ? process.env.LLM_API_KEY?.trim() : '';
 
   if (geminiKey) {
     try {
@@ -75,33 +78,41 @@ async function callGeminiDiagnosis(
   recentLogs: readonly SyslogEntry[],
   nocServerIp?: string,
 ): Promise<AgentDiagnosisResult> {
-  const model = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
   const userContext = JSON.stringify({
     router: { name: router.name, role: router.role, version: router.routerOsVersion },
     telemetry,
-    recentLogs: recentLogs.slice(0, 10),
+    recentLogs: recentLogs.slice(0, 12),
   });
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: buildSystemPrompt(router) }] },
-      contents: [{ role: 'user', parts: [{ text: userContext }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
-    }),
-  });
+  let lastError: Error | null = null;
+  for (const model of getGeminiModelCandidates()) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: buildSystemPrompt(router) }] },
+          contents: [{ role: 'user', parts: [{ text: userContext }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
+        }),
+      });
 
-  if (!resp.ok) {
-    throw new Error(`Gemini API HTTP ${resp.status}`);
+      if (!resp.ok) {
+        lastError = new Error(`Gemini API HTTP ${resp.status} (${model})`);
+        continue;
+      }
+      const data = (await resp.json()) as {
+        candidates?: { content?: { parts?: { text?: string }[] } }[];
+      };
+      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+      return normalizeLlmOutput(JSON.parse(rawText) as CloudLlmRawJson, router, telemetry, recentLogs, nocServerIp);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error('Gemini API error');
+    }
   }
-  const data = (await resp.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
-  return normalizeLlmOutput(JSON.parse(rawText) as CloudLlmRawJson, router, telemetry, recentLogs, nocServerIp);
+  throw lastError ?? new Error('Semua model Gemini gagal merespons');
 }
 
 async function callOpenAiCompatibleDiagnosis(

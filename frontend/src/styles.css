@@ -911,6 +911,10 @@ body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; overflow: hidden
   border-left-color: #ef4444;
   background: #fef2f2;
 }
+.noc-iface-pill.is-drop {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
 .noc-iface-pill strong {
   display: block;
 }
@@ -1569,6 +1573,214 @@ body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; overflow: hidden
 .noc-ai-input-row button {
   margin-top: 0 !important;
   padding: 8px 14px !important;
+}
+
+/* ---------- External Ping Status Chips ---------- */
+.noc-ping-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 4px 0 8px;
+}
+.noc-ping-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-family: ui-monospace, Menlo, monospace;
+  background: rgb(34 197 94 / 0.16);
+  color: #86efac;
+  border: 1px solid rgb(34 197 94 / 0.35);
+}
+.noc-ping-chip.is-high {
+  background: rgb(245 158 11 / 0.22);
+  color: #fde68a;
+  border-color: rgb(245 158 11 / 0.45);
+}
+.noc-ping-chip.is-critical,
+.noc-ping-chip.is-down {
+  background: rgb(239 68 68 / 0.25);
+  color: #fecaca;
+  border-color: rgb(239 68 68 / 0.55);
+}
+.noc-ping-refresh {
+  padding: 2px 6px;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.1);
+  color: #fff;
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+
+/* ---------- Centralized SPV NOC Supervisor Styles ---------- */
+.noc-spv-btn {
+  background: linear-gradient(135deg, rgb(245 158 11 / 0.92), rgb(14 165 233 / 0.88)) !important;
+  border-color: rgb(253 224 71 / 0.75) !important;
+  color: #081020 !important;
+  font-weight: 800 !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.noc-spv-badge {
+  background: #dc2626;
+  color: #fff;
+  font-size: 0.65rem;
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+.ko-tag.is-spv .ko-name {
+  border: 1px solid rgb(251 191 36 / 0.85) !important;
+  background: rgb(15 23 42 / 0.94) !important;
+  color: #fde68a !important;
+  box-shadow: 0 0 14px rgb(251 191 36 / 0.35);
+}
+.noc-spv-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #fbbf24;
+  background: linear-gradient(135deg, #fffbeb, #eff6ff);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.noc-spv-banner strong {
+  display: block;
+  font-size: 0.84rem;
+  color: #0f172a;
+}
+.noc-spv-banner small {
+  display: block;
+  font-size: 0.75rem;
+  color: #475569;
+}
+.noc-spv-reports {
+  display: grid;
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.noc-spv-report-item {
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border-left: 4px solid #38bdf8;
+}
+.noc-spv-report-item.is-warning {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
+.noc-spv-report-item.is-critical {
+  border-left-color: #ef4444;
+  background: #fef2f2;
+}
+
+/* ---------- Interactive 2D Fiber Topology Map Modal ---------- */
+.noc-topo-modal {
+  width: min(1060px, 97vw) !important;
+  max-height: 92vh !important;
+  overflow-y: auto;
+  background: #0b1324 !important;
+  color: #f1f5f9 !important;
+  border: 1px solid rgb(56 189 248 / 0.35);
+}
+.noc-topo-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.noc-topo-form,
+.noc-topo-inspector {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #111d35;
+  border: 1px solid rgb(251 191 36 / 0.45);
+}
+.noc-topo-inspector {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.noc-topo-form-title {
+  font-size: 0.84rem;
+  color: #fde68a;
+  margin-bottom: 8px;
+}
+.noc-topo-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.noc-topo-form-grid label {
+  display: grid;
+  gap: 3px;
+  font-size: 0.74rem;
+  color: #cbd5e1;
+}
+.noc-topo-form-grid input,
+.noc-topo-form-grid select {
+  padding: 6px 8px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #060d1b;
+  color: #f8fafc;
+  font: inherit;
+  font-size: 0.8rem;
+}
+.noc-topo-canvas-wrap {
+  width: 100%;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgb(56 189 248 / 0.28);
+  touch-action: none;
+}
+.noc-topo-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 360px;
+  user-select: none;
+}
+.noc-topo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: #cbd5e1;
+}
+@keyframes foDashFlow {
+  to {
+    stroke-dashoffset: -36;
+  }
+}
+@keyframes foDownBlink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+.noc-fo-flow {
+  animation: foDashFlow 1.2s linear infinite;
+}
+.noc-fo-down {
+  animation: foDownBlink 0.7s ease-in-out infinite;
 }
 
 /* ---------- Full Mobile Responsive Layout (<= 767px) ---------- */

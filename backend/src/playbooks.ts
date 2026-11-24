@@ -116,6 +116,43 @@ export function validateAndBuildPlaybook(
   };
 }
 
+export interface ResolvedWriteCredentials {
+  readonly username: string;
+  readonly secret: string;
+  readonly source: 'router' | 'spv';
+}
+
+/**
+ * Resolves RouterOS write credentials:
+ * 1) Per-router env (`router.execSecretEnv`) if configured
+ * 2) Central 1-account SPV NOC write (`SPV_EXEC_USERNAME` + `SPV_EXEC_SECRET`) for all routers
+ * Returns null when operating in Read-Only mode.
+ */
+export function resolveWriteCredentials(router: RouterDevice): ResolvedWriteCredentials | null {
+  const perRouterSecret = (process.env[router.execSecretEnv] ?? '').trim();
+  if (perRouterSecret) {
+    return {
+      username: router.execUsername,
+      secret: perRouterSecret,
+      source: 'router',
+    };
+  }
+  const spvSecret = (process.env.SPV_EXEC_SECRET ?? '').trim();
+  if (spvSecret) {
+    const spvUser = (process.env.SPV_EXEC_USERNAME ?? '').trim() || 'spv_noc_write';
+    return {
+      username: spvUser,
+      secret: spvSecret,
+      source: 'spv',
+    };
+  }
+  return null;
+}
+
+export function hasWriteCredentialsForRouter(router: RouterDevice): boolean {
+  return resolveWriteCredentials(router) !== null;
+}
+
 export async function executeApprovedProposal(
   router: RouterDevice,
   proposal: ActionProposalPayload,
@@ -127,19 +164,17 @@ export async function executeApprovedProposal(
     return `[SIMULATED OK on ${router.name}] Dieksekusi: ${built.previewCommand}`;
   }
 
-  const execSecret = process.env[router.execSecretEnv] ?? '';
-  if (!execSecret) {
-    throw new Error(
-      `Mode Read-Only aktif: variabel ${router.execSecretEnv} belum diisi di .env untuk eksekusi tulis pada ${router.name}`,
-    );
+  const creds = resolveWriteCredentials(router);
+  if (!creds) {
+    return `[MODE READ-ONLY — DITANDAI DITANGANI MANUAL] Tidak ada perubahan dikirim ke ${router.name}. Perintah Winbox/CLI: ${built.previewCommand}`;
   }
 
   const client = new RouterOsClient({
     host: router.host,
     port: router.port,
     useTls: router.useTls,
-    username: router.execUsername,
-    secret: execSecret,
+    username: creds.username,
+    secret: creds.secret,
     timeoutMs: 8000,
   });
 
@@ -158,5 +193,6 @@ export async function executeApprovedProposal(
     await run(built.words);
   });
 
-  return `[EXECUTED OK on ${router.name}] ${built.previewCommand}`;
+  const actorTag = creds.source === 'spv' ? `SPV Write (${creds.username})` : creds.username;
+  return `[EXECUTED OK via ${actorTag} on ${router.name}] ${built.previewCommand}`;
 }

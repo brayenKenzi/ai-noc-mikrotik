@@ -23,9 +23,91 @@ export interface LiveApprovalTicket {
   executionResult?: string;
 }
 
+export type LiveAgentDutyRole =
+  | 'backbone_master'
+  | 'link_guard'
+  | 'core_vlan_watchdog'
+  | 'bras_gateway'
+  | 'branch_dist';
+
+export interface LiveInterfacePingConfig {
+  interfaceName: string;
+  target: string;
+  warnMs?: number;
+  critMs?: number;
+}
+
+export type LiveFiberLinkType = 'backbone' | 'vlan' | 'olt' | 'backup';
+
+export interface LiveTopologyLink {
+  id: string;
+  fromRouterId: string;
+  fromInterface: string;
+  toRouterId: string;
+  toInterface: string;
+  label: string;
+  fiberType: LiveFiberLinkType;
+  color?: string;
+  fromRouterName: string;
+  toRouterName: string;
+  status: 'ok' | 'degraded' | 'down';
+  liveMbps: number;
+  statusReason: string;
+}
+
+export interface LiveTopologyNodePosition {
+  routerId: string;
+  x: number;
+  y: number;
+}
+
+export interface LiveAiLearnedFact {
+  id: string;
+  createdAt: string;
+  source: string;
+  topic: string;
+  text: string;
+}
+
+export interface LiveAiMemorySummary {
+  totalConversations: number;
+  learnedFacts: LiveAiLearnedFact[];
+}
+
+export interface LivePppoeDropStatus {
+  routerId: string;
+  previousPeak: number;
+  currentCount: number;
+  droppedCount: number;
+  droppedPercent: number;
+  suspectedOltInterfaces: string[];
+  activeIncident: boolean;
+  detectedAt: string;
+}
+
+export interface LiveWatchedLinkStatus {
+  name: string;
+  running: boolean;
+  disabled: boolean;
+  rxMbps: number;
+  txMbps: number;
+  totalMbps: number;
+  baselineMbps: number;
+  dropPercent: number;
+  state: 'ok' | 'drop' | 'down';
+}
+
 export interface LiveRouterConfig {
   id: string;
   name: string;
+  agentName?: string;
+  dutyRole?: LiveAgentDutyRole;
+  dutyLabel?: string;
+  watchedInterfaces?: string[];
+  trafficDropThresholdPct?: number;
+  minTrafficMbps?: number;
+  interfacePing?: LiveInterfacePingConfig | null;
+  customPrompt?: string;
   deviceModel: string;
   host: string;
   port: number;
@@ -34,6 +116,7 @@ export interface LiveRouterConfig {
   role: 'core' | 'bras' | 'branch';
   readUsername: string;
   hasCustomReadPassword?: boolean;
+  writeExecutionReady?: boolean;
   simulated: boolean;
 }
 
@@ -42,6 +125,33 @@ export interface LiveTelemetryPoint {
   cpuLoadPercent: number;
   memoryUsedPercent: number;
   reachable: boolean;
+}
+
+export interface LivePingMetric {
+  target: string;
+  label: string;
+  minMs: number | null;
+  avgMs: number | null;
+  maxMs: number | null;
+  packetLossPercent: number;
+  status: 'ok' | 'high' | 'critical' | 'down';
+  updatedAt: string;
+}
+
+export interface LiveAlertSettings {
+  waEnabled: boolean;
+  waTarget: string;
+  dailyReportEnabled?: boolean;
+  dailyReportHour?: number;
+  lastDailyReportDate?: string;
+  pingWarnMs: number;
+  pingCritMs: number;
+  extPingCritMs?: number;
+  pingLossCritPct: number;
+  pingConfirmCount?: number;
+  pppoeMassDropCount?: number;
+  alertCooldownSec: number;
+  waTokenConfigured: boolean;
 }
 
 export interface LiveRouterTelemetry {
@@ -55,9 +165,16 @@ export interface LiveRouterTelemetry {
   temperatureC: number | null;
   voltageV: number | null;
   activePppoeCount: number;
+  activeHotspotCount?: number;
+  hotspotHostCount?: number;
+  dhcpLeaseCount?: number;
   bgpPeersEstablished: number;
   bgpPeersTotal: number;
   interfaces: { name: string; running: boolean; disabled: boolean; rxMbps: number; txMbps: number }[];
+  ping?: LivePingMetric | null;
+  interfacePingResult?: LivePingMetric | null;
+  watchedLinks?: LiveWatchedLinkStatus[];
+  pppoeDrop?: LivePppoeDropStatus | null;
   status: 'healthy' | 'warning' | 'critical' | 'offline';
   lastError?: string;
 }
@@ -98,6 +215,32 @@ export interface LiveAiBridgeState {
   messages: LiveAiChatMessage[];
 }
 
+export interface LiveSpvReportEntry {
+  id: string;
+  timestamp: string;
+  routerId: string;
+  routerName: string;
+  agentName: string;
+  severity: 'info' | 'warning' | 'critical';
+  category: 'ping' | 'radius' | 'offline' | 'resource' | 'hotspot' | 'recovery';
+  message: string;
+  sentToWa: boolean;
+}
+
+export interface LiveSpvNocState {
+  id: 'spv-noc';
+  name: string;
+  role: string;
+  linked: boolean;
+  modelLabel: string;
+  lastHeartbeatAt: string;
+  totalRouters: number;
+  liveRouters: number;
+  activeAlerts: number;
+  reports: LiveSpvReportEntry[];
+  messages: LiveAiChatMessage[];
+}
+
 export interface LiveOfficeAgent {
   key: string;
   routerId: string;
@@ -119,20 +262,36 @@ export interface LiveOfficeAgent {
   recentLogs: LiveSyslogEntry[];
   pendingApprovals: LiveApprovalTicket[];
   radiusTimeoutCount?: number;
+  hotspotFailedLoginCount?: number;
+  hotspotFailedUsers?: string[];
   aiBridge?: LiveAiBridgeState;
 }
 
 export interface LiveNocSnapshot {
   updatedAt: string;
+  spvNoc?: LiveSpvNocState;
   agents: LiveOfficeAgent[];
+  topologyLinks?: LiveTopologyLink[];
+  topologyPositions?: LiveTopologyNodePosition[];
+  aiMemory?: LiveAiMemorySummary;
   approvals: LiveApprovalTicket[];
   globalLogs?: LiveSyslogEntry[];
   radiusAlerts?: LiveRadiusAlert[];
+  externalPings?: LivePingMetric[];
+  alertSettings?: LiveAlertSettings;
   globalMetrics: { label: string; nilai: string }[];
 }
 
 export interface RouterConfigPatch {
   name?: string;
+  agentName?: string;
+  dutyRole?: LiveAgentDutyRole;
+  dutyLabel?: string;
+  watchedInterfaces?: string[];
+  trafficDropThresholdPct?: number;
+  minTrafficMbps?: number;
+  interfacePing?: LiveInterfacePingConfig | null;
+  customPrompt?: string;
   host?: string;
   port?: number;
   useTls?: boolean;
@@ -480,6 +639,174 @@ export function useNocLive() {
     return json.data;
   }, []);
 
+  const pingNow = useCallback(async () => {
+    const res = await fetch('/api/ping-now', {
+      method: 'POST',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    });
+    const json = (await res.json()) as { success: boolean; data?: LiveNocSnapshot };
+    if (json.success && json.data) {
+      setSnapshot(json.data);
+    }
+  }, []);
+
+  const updateAlertSettings = useCallback(async (patch: Partial<Omit<LiveAlertSettings, 'waTokenConfigured'>>) => {
+    const res = await fetch('/api/alerts/settings', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(patch),
+    });
+    const json = (await res.json()) as {
+      success: boolean;
+      data?: { settings: LiveAlertSettings; snapshot: LiveNocSnapshot };
+      error?: string;
+    };
+    if (!res.ok || !json.success) {
+      throw new Error(json.error ?? 'Gagal menyimpan pengaturan alert WA');
+    }
+    if (json.data?.snapshot) {
+      setSnapshot(json.data.snapshot);
+    }
+    return json.data?.settings;
+  }, []);
+
+  const sendTestWhatsapp = useCallback(async (target?: string) => {
+    const res = await fetch('/api/alerts/test-wa', {
+      method: 'POST',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(target ? { target } : {}),
+    });
+    const json = (await res.json()) as { success: boolean; data?: { ok: boolean; detail: string }; error?: string };
+    if (!res.ok || !json.success) {
+      throw new Error(json.error ?? 'Gagal mengirim pesan tes WA');
+    }
+    return json.data?.detail ?? 'Pesan tes WA terkirim';
+  }, []);
+
+  const askSpvNoc = useCallback(async (question: string, focusRouterId?: string) => {
+    const res = await fetch('/api/spv/ask', {
+      method: 'POST',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ question, ...(focusRouterId ? { focusRouterId } : {}) }),
+    });
+    const json = (await res.json()) as {
+      success: boolean;
+      data?: { reply: string; source: string; snapshot?: LiveNocSnapshot };
+      error?: string;
+    };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error ?? 'Gagal menghubungi SPV NOC');
+    }
+    if (json.data.snapshot) {
+      setSnapshot(json.data.snapshot);
+    }
+    return json.data;
+  }, []);
+
+  const sendSpvSummaryWa = useCallback(async (target?: string) => {
+    const res = await fetch('/api/spv/send-summary-wa', {
+      method: 'POST',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(target ? { target } : {}),
+    });
+    const json = (await res.json()) as {
+      success: boolean;
+      data?: { ok: boolean; detail: string; snapshot?: LiveNocSnapshot };
+      error?: string;
+    };
+    if (!res.ok || !json.success) {
+      throw new Error(json.error ?? 'Gagal mengirim laporan SPV ke WA');
+    }
+    if (json.data?.snapshot) {
+      setSnapshot(json.data.snapshot);
+    }
+    return json.data?.detail ?? 'Laporan SPV NOC terkirim ke WhatsApp';
+  }, []);
+
+  const addTopologyLink = useCallback(
+    async (payload: {
+      fromRouterId: string;
+      fromInterface: string;
+      toRouterId: string;
+      toInterface: string;
+      label?: string;
+      fiberType?: LiveFiberLinkType;
+    }) => {
+      const res = await fetch('/api/topology/links', {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const json = (await res.json()) as {
+        success: boolean;
+        data?: { link: LiveTopologyLink; snapshot: LiveNocSnapshot };
+        error?: string;
+      };
+      if (!res.ok || !json.success) {
+        throw new Error(json.error ?? 'Gagal menarik kabel topologi');
+      }
+      if (json.data?.snapshot) setSnapshot(json.data.snapshot);
+    },
+    [],
+  );
+
+  const deleteTopologyLink = useCallback(async (linkId: string) => {
+    const res = await fetch(`/api/topology/links/${encodeURIComponent(linkId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    });
+    const json = (await res.json()) as { success: boolean; data?: { snapshot: LiveNocSnapshot }; error?: string };
+    if (!res.ok || !json.success) {
+      throw new Error(json.error ?? 'Gagal menghapus kabel');
+    }
+    if (json.data?.snapshot) setSnapshot(json.data.snapshot);
+  }, []);
+
+  const saveTopologyPositions = useCallback(async (positions: LiveTopologyNodePosition[]) => {
+    const res = await fetch('/api/topology/positions', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ positions }),
+    });
+    const json = (await res.json()) as { success: boolean; data?: { snapshot: LiveNocSnapshot } };
+    if (json.success && json.data?.snapshot) setSnapshot(json.data.snapshot);
+  }, []);
+
+  const addAiMemoryFact = useCallback(async (text: string, topic = 'SOP & Topologi') => {
+    const res = await fetch('/api/memory/facts', {
+      method: 'POST',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ text, topic }),
+    });
+    const json = (await res.json()) as { success: boolean; data?: { snapshot: LiveNocSnapshot }; error?: string };
+    if (!res.ok || !json.success) {
+      throw new Error(json.error ?? 'Gagal menyimpan memori AI');
+    }
+    if (json.data?.snapshot) setSnapshot(json.data.snapshot);
+  }, []);
+
+  const deleteAiMemoryFact = useCallback(async (factId: string) => {
+    const res = await fetch(`/api/memory/facts/${encodeURIComponent(factId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    });
+    const json = (await res.json()) as { success: boolean; data?: { snapshot: LiveNocSnapshot }; error?: string };
+    if (!res.ok || !json.success) {
+      throw new Error(json.error ?? 'Gagal menghapus memori AI');
+    }
+    if (json.data?.snapshot) setSnapshot(json.data.snapshot);
+  }, []);
+
   return {
     authState,
     adminUser,
@@ -491,6 +818,7 @@ export function useNocLive() {
     busyTicketId,
     pollingNow,
     pollNow,
+    pingNow,
     decideApproval,
     simulateIncident,
     addRouter,
@@ -498,5 +826,14 @@ export function useNocLive() {
     updateRouterConfig,
     testRouterConnection,
     askAgentAi,
+    askSpvNoc,
+    sendSpvSummaryWa,
+    addTopologyLink,
+    deleteTopologyLink,
+    saveTopologyPositions,
+    addAiMemoryFact,
+    deleteAiMemoryFact,
+    updateAlertSettings,
+    sendTestWhatsapp,
   };
 }

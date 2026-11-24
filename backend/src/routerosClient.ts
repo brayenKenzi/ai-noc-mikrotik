@@ -201,32 +201,61 @@ export class RouterOsClient {
     await this.openSocket(timeoutMs);
     try {
       await this.authenticate(timeoutMs);
-      const results: RouterOsCommandOutcome[] = [];
-      for (const cmd of commands) {
-        const sentences = await this.exchange(cmd, timeoutMs);
-        const trap = sentences.find((s) => s[0] === '!trap' || s[0] === '!fatal');
-        const done = sentences.find((s) => s[0] === '!done');
-        const doneAttrs = done ? parseSentenceAttributes(done) : {};
-        if (trap) {
-          const errAttrs = parseSentenceAttributes(trap);
-          results.push({
-            ok: false,
-            rows: [],
-            doneAttrs,
-            error: errAttrs.message ?? 'RouterOS command failed (!trap)',
-          });
-        } else {
-          results.push({
-            ok: true,
-            rows: sentences.filter((s) => s[0] === '!re').map((s) => parseSentenceAttributes(s)),
-            doneAttrs,
-          });
-        }
-      }
-      return results;
+      return await this.runTolerantBatch(commands, timeoutMs);
     } finally {
       this.close();
     }
+  }
+
+  /**
+   * Opens & authenticates once so callers can reuse the socket across many polling ticks
+   * without repeatedly triggering login/logout entries in MikroTik logs.
+   */
+  async connectPersistent(): Promise<void> {
+    const timeoutMs = this.options.timeoutMs ?? 6000;
+    await this.openSocket(timeoutMs);
+    try {
+      await this.authenticate(timeoutMs);
+      // Disable idle socket timeout once authenticated; per-command timers guard hung commands
+      this.socket?.setTimeout(0);
+      this.socket?.setKeepAlive(true, 15_000);
+    } catch (err) {
+      this.close();
+      throw err;
+    }
+  }
+
+  get isConnected(): boolean {
+    return Boolean(this.socket && !this.socket.destroyed && this.socket.writable);
+  }
+
+  async runTolerantBatch(
+    commands: readonly (readonly string[])[],
+    timeoutMs = this.options.timeoutMs ?? 6000,
+  ): Promise<RouterOsCommandOutcome[]> {
+    const results: RouterOsCommandOutcome[] = [];
+    for (const cmd of commands) {
+      const sentences = await this.exchange(cmd, timeoutMs);
+      const trap = sentences.find((s) => s[0] === '!trap' || s[0] === '!fatal');
+      const done = sentences.find((s) => s[0] === '!done');
+      const doneAttrs = done ? parseSentenceAttributes(done) : {};
+      if (trap) {
+        const errAttrs = parseSentenceAttributes(trap);
+        results.push({
+          ok: false,
+          rows: [],
+          doneAttrs,
+          error: errAttrs.message ?? 'RouterOS command failed (!trap)',
+        });
+      } else {
+        results.push({
+          ok: true,
+          rows: sentences.filter((s) => s[0] === '!re').map((s) => parseSentenceAttributes(s)),
+          doneAttrs,
+        });
+      }
+    }
+    return results;
   }
 
   private openSocket(timeoutMs: number): Promise<void> {
@@ -376,5 +405,99 @@ export class RouterOsClient {
       this.socket.destroy();
       this.socket = null;
     }
+  }
+}
+
+interface PooledEntry {
+  readonly signature: string;
+  client: RouterOsClient | null;
+  queue: Promise<void>;
+}
+
+/**
+ * Keeps 1 persistent authenticated RouterOS API session per router so telemetry & traffic
+ * can refresh every few seconds with ZERO repeated login/logout churn on MikroTik.
+ */
+export class RouterOsSessionPool {
+  private readonly pool = new Map<string, PooledEntry>();
+
+  async runTolerant(
+    routerId: string,
+    options: RouterOsConnectionOptions,
+    commands: readonly (readonly string[])[],
+  ): Promise<RouterOsCommandOutcome[]> {
+    const sigHash = crypto.createHash('sha256').update(options.secret).digest('hex').slice(0, 12);
+    const signature = `${options.host}:${options.port}:${options.useTls}:${options.username}:${sigHash}`;
+
+    let entry = this.pool.get(routerId);
+    if (!entry || entry.signature !== signature) {
+      entry?.client?.close();
+      entry = { signature, client: null, queue: Promise.resolve() };
+      this.pool.set(routerId, entry);
+    }
+
+    const activeEntry = entry;
+    let resolveResult!: (value: RouterOsCommandOutcome[]) => void;
+    let rejectResult!: (err: unknown) => void;
+    const resultPromise = new Promise<RouterOsCommandOutcome[]>((res, rej) => {
+      resolveResult = res;
+      rejectResult = rej;
+    });
+
+    activeEntry.queue = activeEntry.queue
+      .catch(() => {})
+      .then(async () => {
+        const resetSocket = () => {
+          const current: RouterOsClient | null = activeEntry.client;
+          current?.close();
+          activeEntry.client = null;
+        };
+
+        const executeOnce = async (): Promise<RouterOsCommandOutcome[]> => {
+          if (!activeEntry.client || !activeEntry.client.isConnected) {
+            resetSocket();
+            const fresh = new RouterOsClient(options);
+            await fresh.connectPersistent();
+            activeEntry.client = fresh;
+          }
+          return activeEntry.client.runTolerantBatch(commands, options.timeoutMs ?? 5000);
+        };
+
+        try {
+          resolveResult(await executeOnce());
+        } catch (firstErr) {
+          // If an existing persistent socket dropped mid-flight, reconnect cleanly once
+          const hadSocket = Boolean(activeEntry.client);
+          resetSocket();
+          if (hadSocket && !(firstErr instanceof Error && /invalid user name or password/i.test(firstErr.message))) {
+            try {
+              resolveResult(await executeOnce());
+              return;
+            } catch (retryErr) {
+              resetSocket();
+              rejectResult(retryErr);
+              return;
+            }
+          }
+          rejectResult(firstErr);
+        }
+      });
+
+    return resultPromise;
+  }
+
+  invalidate(routerId: string): void {
+    const entry = this.pool.get(routerId);
+    if (entry) {
+      entry.client?.close();
+      this.pool.delete(routerId);
+    }
+  }
+
+  closeAll(): void {
+    for (const entry of this.pool.values()) {
+      entry.client?.close();
+    }
+    this.pool.clear();
   }
 }
