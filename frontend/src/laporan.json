@@ -1,0 +1,35 @@
+{
+  "crs-backbone-01": {
+    "ringkasan": "CRS-Backbone-01 · Switching ring backbone stabil · Menunggu IP real.",
+    "angka": [{ "label": "Backbone", "nilai": "CRS-01" }]
+  },
+  "crs-backbone-02": {
+    "ringkasan": "CRS-Backbone-02 · Switching ring backbone stabil · Menunggu IP real.",
+    "angka": [{ "label": "Backbone", "nilai": "CRS-02" }]
+  },
+  "core-mongkonai": {
+    "ringkasan": "CORE MONGKONAI · Core Backbone routing & distribusi utama · Menunggu IP real.",
+    "angka": [{ "label": "Core", "nilai": "Mongkonai" }]
+  },
+  "crs-backbone-03": {
+    "ringkasan": "CRS-Backbone-03 · Switching ring backbone stabil · Menunggu IP real.",
+    "angka": [{ "label": "Backbone", "nilai": "CRS-03" }]
+  },
+  "crs-backbone-04": {
+    "ringkasan": "CRS-Backbone-04 · Switching ring backbone stabil · Menunggu IP real.",
+    "angka": [{ "label": "Backbone", "nilai": "CRS-04" }]
+  },
+  "ccr-momonet-pusat": {
+    "ringkasan": "CCR-Pusat-MomoNet (ROS v7) · Manajemen pelanggan Momo Net aktif.",
+    "angka": [{ "label": "Pusat", "nilai": "ROS v7" }]
+  },
+  "rb750-qairen": {
+    "ringkasan": "RB750Gr3-QairenNet (ROS v6) · Distribusi pelanggan Qairen Net stabil."
+  },
+  "rb750-dn-bangomolunow": {
+    "ringkasan": "RB750Gr3-DN-Bangomolunow (ROS v6) · Distribusi Digital Net Bangomolunow stabil."
+  },
+  "rb750-dn-lolan": {
+    "ringkasan": "RB750Gr3-DN-Lolan (ROS v6) · Distribusi Digital Net Lolan stabil."
+  }
+}

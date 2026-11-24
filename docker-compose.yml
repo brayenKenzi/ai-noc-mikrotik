@@ -1,0 +1,27 @@
+services:
+  noc-backend:
+    build:
+      context: ./backend
+    container_name: ai-noc-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=4000
+      - SYSLOG_UDP_PORT=5514
+      - NOC_DATA_DIR=/app/data
+    ports:
+      - "${NOC_API_PORT:-4090}:4000/tcp"
+      - "${SYSLOG_UDP_PORT:-5514}:5514/udp"
+    volumes:
+      - ./data:/app/data
+
+  noc-kantor-ui:
+    build:
+      context: ./frontend
+    container_name: ai-noc-kantor-ui
+    restart: unless-stopped
+    depends_on:
+      - noc-backend
+    ports:
+      - "${NOC_WEB_PORT:-8090}:80/tcp"

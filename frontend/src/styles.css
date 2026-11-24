@@ -1,0 +1,1732 @@
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; }
+body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; overflow: hidden; }
+.ko { position: fixed !important; inset: 0; display: block !important; overflow: hidden; color: #1b1330;
+  background: radial-gradient(130% 90% at 50% 15%, #fff7ee 0%, #f3e6d6 55%, #e2cfbb 100%); }
+.ko[data-night] { color: #fff; background: radial-gradient(130% 90% at 50% 15%, #2b2147 0%, #150f26 60%, #0b0816 100%); }
+.ko .ko-stage { position: absolute; inset: 0; aspect-ratio: auto; min-height: 0; border: 0; border-radius: 0; background: none; }
+.ko-sheet { position: fixed; inset: 0; z-index: 5; display: grid; place-items: end center; background: rgb(0 0 0 / 0.35); }
+.ko-sheet-in { width: min(480px, 100%); margin: 16px; padding: 20px; border-radius: 20px; background: #fff; color: #1b1330; }
+.ko-sheet-in h3 { margin: 0 0 8px; } .ko-sheet-in h3 small { font-weight: 500; color: #6a6380; }
+.ko-sheet-sum { padding: 10px; border-radius: 12px; background: #f4f1f9; }
+.ko-sheet-urgent { color: #c4173f; font-weight: 600; }
+.ko-sheet-in button { margin-top: 8px; padding: 10px 16px; border: 0; border-radius: 10px; background: #271b3f; color: #fff; font: inherit; cursor: pointer; }
+.ko-urgent { font-size: 14px; }
+/* Kantor AI: label, gelembung, HUD, Mission Board */
+.ko {
+  display: grid;
+  gap: 16px;
+}
+.ko-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ko-sample {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: #fde8ee;
+  color: #c4173f;
+  font-size: 0.875rem;
+}
+.ko-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  align-items: start;
+}
+@media (max-width: 1023px) {
+  .ko-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- the 3D stage ---------- */
+.ko-stage {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  min-height: 360px;
+  border-radius: 20px;
+  overflow: hidden;
+  background: radial-gradient(120% 90% at 50% 0%, #fff 0%, #efe9f8 60%, #e3dbf0 100%);
+  border: 1px solid #e8e3f0;
+  isolation: isolate;
+}
+.ko[data-night] .ko-stage {
+  background: radial-gradient(120% 90% at 50% 0%, #2a2245 0%, #171127 70%, #0f0b1c 100%);
+  border-color: transparent;
+}
+@media (max-width: 767px) {
+  .ko-stage {
+    aspect-ratio: 9 / 13;
+    min-height: 0;
+  }
+}
+.ko-canvas,
+.ko-canvas canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.ko-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #6a6380;
+  font-size: 0.875rem;
+}
+.ko-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.ko-layer .ko-tag,
+.ko-board-pin {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate3d(-999px, -999px, 0);
+  will-change: transform;
+}
+.ko-layer .ko-tag-in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  translate: -50% -100%;
+}
+.ko-board-pin {
+  translate: -50% -100%;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #271b3f;
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ---------- a desk's tag (name, "!", label, bubble) ---------- */
+.ko-tag {
+  pointer-events: none;
+}
+.ko-tag-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: auto;
+  width: max-content;
+}
+.ko-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 10px 4px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  color: #1b1330;
+  font: 700 0.8125rem/1 'Plus Jakarta Sans', system-ui, sans-serif;
+  box-shadow: 0 2px 8px rgb(27 19 48 / 0.18);
+  cursor: pointer;
+}
+.ko-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--agent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--agent) 30%, transparent);
+}
+.ko-tag[data-act='kerja'] .ko-dot,
+.ko-tag[data-act='laporan'] .ko-dot {
+  animation: ko-pulse 1.2s ease-in-out infinite;
+}
+.ko-bang {
+  display: inline-grid;
+  place-items: center;
+  grid-auto-flow: column;
+  gap: 2px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: #ffb020;
+  color: #1b1330;
+  font: 800 1rem/1 'Plus Jakarta Sans', system-ui, sans-serif;
+  box-shadow: 0 2px 8px rgb(27 19 48 / 0.25);
+  cursor: pointer;
+  animation: ko-hop 2.4s cubic-bezier(0.34, 1.4, 0.64, 1) infinite;
+}
+.ko-bang[data-mine] {
+  background: #f3355b;
+  color: #fff;
+}
+.ko-bang small {
+  font-size: 0.6875rem;
+}
+.ko-urgent {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #fff;
+  color: #f3355b;
+  animation: ko-pulse 0.9s ease-in-out infinite;
+}
+.ko-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  max-width: 180px;
+  padding: 2px 8px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: rgb(27 19 48 / 0.72);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.ko-tag[data-act='pulang'] .ko-label {
+  background: rgb(27 19 48 / 0.4);
+}
+.ko-bubble {
+  width: max-content;
+  max-width: min(240px, 60vw);
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 14px 14px 14px 4px;
+  background: #fff;
+  color: #1b1330;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  box-shadow: 0 6px 18px rgb(27 19 48 / 0.18);
+  animation: ko-in 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---------- the flat office (no WebGL, or ?tampilan=2d) ---------- */
+.ko-flat {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1.4fr 1fr 1.2fr;
+}
+@media (max-width: 767px) {
+  .ko-flat {
+    grid-template-columns: 1fr;
+  }
+}
+.ko-room {
+  padding: 14px;
+  border-radius: 20px;
+  background: #efe7f7;
+  border: 1px solid #e8e3f0;
+}
+.ko-room[data-room='keuangan'] {
+  background: #fbf0dc;
+}
+.ko-room[data-room='studio'] {
+  background: #e3eefc;
+}
+.ko[data-night] .ko-room {
+  background: #2a2245;
+  color: #fff;
+}
+.ko-room h3 {
+  margin: 0 0 10px;
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: inherit;
+  opacity: 0.75;
+}
+.ko-room-desks {
+  display: grid;
+  gap: 10px;
+}
+.ko-flat-desk {
+  padding: 12px;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 0.7);
+  border: 2px solid transparent;
+}
+.ko[data-night] .ko-flat-desk {
+  background: rgb(255 255 255 / 0.08);
+}
+.ko-flat-desk[data-urgent] {
+  animation: ko-blink 1.4s ease-in-out infinite;
+}
+.ko-flat-desk .ko-tag-in {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+.ko-flat-desk .ko-bubble {
+  max-width: none;
+  width: auto;
+}
+
+/* ---------- Mission Board ---------- */
+.ko-mb {
+  padding: 16px;
+  border-radius: 20px;
+  background: #271b3f;
+  color: #fff;
+}
+.ko-mb h2 {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ko-mb h3 {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 14px 0 8px;
+  font-size: 0.8125rem;
+  color: rgb(255 255 255 / 0.75);
+}
+.ko-mb ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ko-mb-items button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: #ffd166;
+  color: #1b1330;
+  font: 500 0.8125rem/1.35 'Plus Jakarta Sans', system-ui, sans-serif;
+  text-align: left;
+  cursor: pointer;
+  rotate: -0.6deg;
+}
+.ko-mb-items li:nth-child(even) button {
+  background: #b2f7ef;
+  rotate: 0.6deg;
+}
+.ko-mb-items li[data-mine] button {
+  box-shadow: inset 4px 0 0 #f3355b;
+}
+.ko-mb-items small {
+  color: #4a4260;
+  font-size: 0.6875rem;
+}
+.ko-mb-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0;
+}
+.ko-mb-metrics div {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 0.08);
+}
+.ko-mb-metrics dt {
+  font-size: 0.6875rem;
+  color: rgb(255 255 255 / 0.7);
+}
+.ko-mb-metrics dd {
+  margin: 2px 0 0;
+  font-size: 1.0625rem;
+  font-weight: 700;
+}
+.ko-mb-empty {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: rgb(255 255 255 / 0.7);
+}
+
+/* ---------- the desk sheet ---------- */
+.ko-detail {
+  display: grid;
+  gap: 14px;
+}
+.ko-detail-doing {
+  margin: 0;
+}
+.ko-detail-doing small {
+  color: #6a6380;
+}
+.ko-detail-sum {
+  margin: 0;
+  padding: 12px;
+  border-radius: 14px;
+  background: #f4f1f9;
+}
+.ko-detail-items {
+  display: grid;
+  gap: 10px;
+}
+.ko-sample-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+@keyframes ko-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes ko-hop {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+  }
+  88% {
+    transform: translateY(-5px);
+  }
+}
+@keyframes ko-blink {
+  50% {
+    border-color: #f3355b;
+    box-shadow: 0 0 0 4px rgb(243 53 91 / 0.18);
+  }
+}
+@keyframes ko-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ko-dot,
+  .ko-bang,
+  .ko-urgent,
+  .ko-flat-desk[data-urgent],
+  .ko-bubble {
+    animation: none;
+  }
+  .ko-flat-desk[data-urgent] {
+    border-color: #f3355b;
+  }
+}
+
+/* ---------- layar penuh (?layar=penuh): the office alone, for the big screen and recordings ---------- */
+.ko-unused {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: block;
+  background: radial-gradient(130% 90% at 50% 15%, #fff7ee 0%, #f3e6d6 55%, #e2cfbb 100%);
+  color: #1b1330;
+  overflow: hidden;
+}
+.ko[data-night] {
+  background: radial-gradient(130% 90% at 50% 15%, #2b2147 0%, #150f26 60%, #0b0816 100%);
+  color: #fff;
+}
+.ko .ko-stage {
+  position: absolute;
+  inset: 0;
+  aspect-ratio: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.ko .ko-name {
+  font-size: 0.9375rem;
+  min-height: 36px;
+}
+.ko .ko-label {
+  font-size: 0.75rem;
+}
+.ko .ko-bubble {
+  font-size: 0.875rem;
+  max-width: min(300px, 70vw);
+}
+.ko-hud {
+  position: absolute;
+  inset: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: max(20px, env(safe-area-inset-top)) 24px 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.ko-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgb(27 19 48 / 0.82);
+  color: #fff;
+  backdrop-filter: blur(8px);
+}
+.ko-brand b {
+  display: block;
+  font-size: 1.0625rem;
+  letter-spacing: 0.02em;
+}
+.ko-brand small {
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+.ko-live {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 0 4px rgb(74 222 128 / 0.25);
+  animation: ko-pulse 1.4s ease-in-out infinite;
+}
+.ko-clock {
+  margin-left: auto;
+  text-align: right;
+}
+.ko-clock b {
+  display: block;
+  font-size: clamp(2rem, 6vw, 3.25rem);
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.ko-clock small {
+  font-size: 0.8125rem;
+  opacity: 0.75;
+}
+.ko-hud-close {
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: rgb(27 19 48 / 0.7);
+  color: #fff;
+  cursor: pointer;
+}
+.ko-act {
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  translate: -50% 0;
+  z-index: 2;
+  margin: 0;
+  padding: 10px 22px;
+  border-radius: 999px;
+  background: linear-gradient(120deg, #fa225e, #fd3e55);
+  color: #fff;
+  font-weight: 800;
+  font-size: clamp(1rem, 3.2vw, 1.375rem);
+  white-space: nowrap;
+  box-shadow: 0 10px 30px rgb(243 53 91 / 0.35);
+  animation: ko-act 3.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  pointer-events: none;
+}
+@keyframes ko-act {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.92);
+  }
+  12%,
+  70% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+.ko-mini {
+  position: absolute;
+  left: 24px;
+  bottom: max(24px, env(safe-area-inset-bottom));
+  z-index: 2;
+  width: min(380px, calc(100vw - 48px));
+  padding: 14px 16px;
+  border-radius: 20px;
+  background: rgb(27 19 48 / 0.86);
+  color: #fff;
+  backdrop-filter: blur(10px);
+}
+.ko-mini h2 {
+  margin: 0 0 8px;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+.ko-mini ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+.ko-mini dl {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 12px 0 0;
+}
+.ko-mini dd {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 800;
+}
+.ko-mini dt {
+  font-size: 0.625rem;
+  opacity: 0.7;
+}
+.ko-full-note {
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  z-index: 2;
+  margin: 0;
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+@media (max-aspect-ratio: 1/1) {
+  .ko-mini {
+    left: 16px;
+    right: 16px;
+    width: auto;
+  }
+  .ko-hud {
+    padding-inline: 16px;
+  }
+}
+.ko-full[data-rec] .ko-bang,
+.ko-full[data-rec] .ko-dot,
+.ko-full[data-rec] .ko-urgent,
+.ko-full[data-rec] .ko-live {
+  animation: none;
+}
+
+/* Full screen tags, after the trend videos: one dark pill "● Raka  radar tender…", a thought bubble above. */
+.ko .ko-name {
+  background: rgb(27 19 48 / 0.86);
+  color: #fff;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  font-size: 0.875rem;
+  backdrop-filter: blur(6px);
+}
+.ko-name-act {
+  font-weight: 500;
+  font-size: 0.75rem;
+  color: rgb(255 255 255 / 0.72);
+  white-space: nowrap;
+}
+.ko-think {
+  display: inline-grid;
+  place-items: center;
+  min-width: 38px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 14px;
+  background: #fff;
+  color: #3a86ff;
+  font: 800 0.8125rem/1 ui-monospace, monospace;
+  box-shadow: 0 3px 10px rgb(27 19 48 / 0.2);
+}
+
+/* Pemilih gaya 3D (pojok kanan bawah) dan kabur tilt-shift gaya diorama. */
+.ko-gaya { position: absolute; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); z-index: 4; display: grid; justify-items: end; gap: 6px; font-size: 0.8125rem; }
+.ko-gaya ul { display: grid; gap: 2px; max-height: min(60vh, 460px); overflow: auto; margin: 0; padding: 6px; list-style: none; border-radius: 14px; background: rgb(255 255 255 / 0.94); color: #1b1330; box-shadow: 0 8px 30px rgb(0 0 0 / 0.18); }
+.ko-gaya li button { display: flex; width: 100%; justify-content: space-between; gap: 12px; padding: 6px 10px; border: 0; border-radius: 9px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ko-gaya li button:hover { background: #f1ecf8; }
+.ko-gaya li button[aria-pressed='true'] { background: #271b3f; color: #fff; }
+.ko-gaya li small { opacity: 0.6; font-size: 0.6875rem; }
+.ko-gaya-btn { padding: 8px 14px; border: 0; border-radius: 999px; background: rgb(39 27 63 / 0.85); color: #fff; font: inherit; font-weight: 600; cursor: pointer; backdrop-filter: blur(6px); }
+.ko-tilt { position: absolute; inset: 0; pointer-events: none; backdrop-filter: blur(4px) saturate(1.2);
+  -webkit-mask-image: linear-gradient(#000 0%, transparent 34%, transparent 66%, #000 100%); mask-image: linear-gradient(#000 0%, transparent 34%, transparent 66%, #000 100%); }
+
+/* Gaya hologram: label mono berbingkai cyan (acuan hero AI Agent). */
+.ko[data-gaya='hologram'] .ko-name {
+  border: 1px solid rgb(34 211 238 / 0.6);
+  border-radius: 4px;
+  background: rgb(3 10 22 / 0.82);
+  color: #a5f3fc;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-weight: 500;
+  box-shadow: 0 0 10px rgb(34 211 238 / 0.25);
+}
+.ko[data-gaya='hologram'] .ko-name-act {
+  color: #67e8f9;
+}
+
+
+/* ---------- AI NOC Approval & Telemetry Extensions ---------- */
+.noc-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.noc-metrics-grid > div {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f4f1f9;
+  font-size: 0.8rem;
+}
+.noc-metrics-grid span {
+  display: block;
+  color: #6a6380;
+  font-size: 0.72rem;
+}
+.noc-approvals h4,
+.noc-logs h4 {
+  margin: 14px 0 8px;
+  font-size: 0.9rem;
+}
+.noc-card {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #e2d9f3;
+  background: #faf8ff;
+  margin-bottom: 10px;
+}
+.noc-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.noc-risk {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.noc-risk-low { background: #dcfce7; color: #166534; }
+.noc-risk-medium { background: #fef3c7; color: #92400e; }
+.noc-risk-high { background: #fee2e2; color: #991b1b; }
+.noc-cmd {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #1b1330;
+  color: #66e3a5;
+  font-size: 0.78rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+.noc-btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.noc-btn-approve {
+  background: #16a34a !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+}
+.noc-btn-reject {
+  background: #dc2626 !important;
+  color: #fff !important;
+}
+.noc-btn-sim {
+  background: #ebe5f7 !important;
+  color: #271b3f !important;
+  font-size: 0.76rem !important;
+  padding: 6px 10px !important;
+}
+.noc-logs ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  background: #141022;
+  color: #e9e4f5;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.76rem;
+}
+.noc-logs li {
+  padding: 3px 0;
+  border-bottom: 1px solid rgb(255 255 255 / 0.08);
+}
+.noc-logs li[data-sev="critical"],
+.noc-logs li[data-sev="error"] {
+  color: #fda4af;
+}
+.noc-drill {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed #d8d0e8;
+}
+
+
+/* ---------- Fleet Drawer, Router Config & Interfaces ---------- */
+.noc-fleet-btn {
+  margin-left: 8px;
+  padding: 6px 12px;
+  border: 1px solid rgb(255 255 255 / 0.25);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.14);
+  color: #fff;
+  font: 600 0.75rem/1 'Plus Jakarta Sans', system-ui, sans-serif;
+  cursor: pointer;
+}
+.noc-fleet-btn:hover {
+  background: rgb(255 255 255 / 0.24);
+}
+.noc-fleet-drawer {
+  position: absolute;
+  top: 84px;
+  left: 24px;
+  z-index: 4;
+  width: min(360px, calc(100vw - 48px));
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  padding: 12px;
+  border-radius: 18px;
+  background: rgb(27 19 48 / 0.94);
+  color: #fff;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
+}
+.noc-fleet-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.noc-fleet-head h3 {
+  margin: 0;
+  font-size: 0.85rem;
+}
+.noc-fleet-head button {
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  font-size: 1rem;
+}
+.noc-fleet-drawer ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.noc-fleet-drawer li button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 0.06);
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.noc-fleet-drawer li button:hover {
+  background: rgb(255 255 255 / 0.14);
+}
+.noc-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.noc-fleet-info {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.noc-fleet-info strong {
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.noc-fleet-info small {
+  font-size: 0.68rem;
+  opacity: 0.75;
+}
+.noc-fleet-cpu {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #67e8f9;
+}
+.noc-mode-badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.noc-mode-badge.is-live {
+  background: #dcfce7;
+  color: #166534;
+}
+.noc-mode-badge.is-sim {
+  background: #fef3c7;
+  color: #92400e;
+}
+.noc-ifaces h4 {
+  margin: 12px 0 6px;
+  font-size: 0.85rem;
+}
+.noc-iface-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.noc-iface-pill {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f4f1f9;
+  font-size: 0.74rem;
+  border-left: 3px solid #22c55e;
+}
+.noc-iface-pill.is-down {
+  border-left-color: #ef4444;
+  background: #fef2f2;
+}
+.noc-iface-pill strong {
+  display: block;
+}
+.noc-iface-pill small {
+  color: #5b5370;
+}
+.noc-config-box {
+  margin-top: 12px;
+  border: 1px solid #e2d9f3;
+  border-radius: 12px;
+  background: #faf8ff;
+  overflow: hidden;
+}
+.noc-config-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  margin: 0 !important;
+  padding: 10px 12px !important;
+  border-radius: 0 !important;
+  background: #efe9f8 !important;
+  color: #1b1330 !important;
+  font-weight: 700 !important;
+  font-size: 0.84rem !important;
+}
+.noc-config-body {
+  padding: 12px;
+}
+.noc-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.noc-form-grid label {
+  display: grid;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: #4a4360;
+}
+.noc-form-grid input,
+.noc-form-grid select {
+  padding: 6px 8px;
+  border: 1px solid #d4cbe6;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.82rem;
+  background: #fff;
+  color: #1b1330;
+}
+.noc-check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 10px 0 6px;
+  font-size: 0.8rem;
+}
+.noc-check-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.noc-feedback {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.noc-feedback.is-ok {
+  background: #dcfce7;
+  color: #166534;
+}
+.noc-feedback.is-err {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+
+/* ---------- Sparkline, Audit Tabs & Add Router Form ---------- */
+.noc-mini-action {
+  padding: 4px 8px;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.12);
+  color: #fff;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.noc-mini-action:hover {
+  background: rgb(255 255 255 / 0.24);
+}
+.noc-add-form {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid rgb(255 255 255 / 0.15);
+}
+.noc-add-form input,
+.noc-add-form select {
+  padding: 6px 8px;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 8px;
+  background: rgb(15 11 28 / 0.8);
+  color: #fff;
+  font: inherit;
+  font-size: 0.78rem;
+}
+.noc-add-form button {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.noc-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+.noc-tabs button {
+  margin-top: 0 !important;
+  padding: 7px 12px !important;
+  background: #ebe5f7 !important;
+  color: #271b3f !important;
+  font-size: 0.8rem !important;
+  font-weight: 600;
+}
+.noc-tabs button.is-active {
+  background: #271b3f !important;
+  color: #fff !important;
+}
+.noc-status-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.noc-status-pill.is-pending { background: #fef3c7; color: #92400e; }
+.noc-status-pill.is-executed { background: #dcfce7; color: #166534; }
+.noc-status-pill.is-rejected { background: #fee2e2; color: #991b1b; }
+.noc-status-pill.is-failed { background: #fecaca; color: #7f1d1d; }
+.noc-status-pill.is-expired { background: #e5e7eb; color: #374151; }
+.noc-spark-box {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #faf8ff;
+  border: 1px solid #e2d9f3;
+}
+.noc-spark-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.73rem;
+  color: #5b5370;
+  margin-bottom: 4px;
+}
+.noc-spark-svg {
+  width: 100%;
+  height: 54px;
+  display: block;
+}
+
+
+/* ---------- Password Input Row & TLS Warning ---------- */
+.noc-pass-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.noc-pass-row input {
+  flex: 1;
+}
+.noc-pass-eye {
+  margin-top: 0 !important;
+  padding: 6px 10px !important;
+  background: #ebe5f7 !important;
+  color: #1b1330 !important;
+  font-size: 0.85rem !important;
+}
+.noc-link-btn {
+  margin: 0 !important;
+  padding: 0 4px !important;
+  background: transparent !important;
+  color: #dc2626 !important;
+  font-size: 0.72rem !important;
+  text-decoration: underline;
+}
+.noc-feedback.is-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+
+/* ---------- Datacenter Theme, Login Gate, Camera Dock & RADIUS Banner ---------- */
+.ko[data-gaya='datacenter'] .ko-name {
+  border: 1px solid rgb(56 189 248 / 0.55);
+  border-radius: 8px;
+  background: rgb(8 15 32 / 0.88);
+  color: #e0f2fe;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgb(2 6 23 / 0.55), 0 0 10px rgb(56 189 248 / 0.2);
+}
+.ko[data-gaya='datacenter'] .ko-name-act {
+  color: #38bdf8;
+}
+.ko[data-gaya='datacenter'] .ko-brand,
+.ko[data-gaya='datacenter'] .ko-mini {
+  background: rgb(8 15 32 / 0.88);
+  border: 1px solid rgb(56 189 248 / 0.25);
+  box-shadow: 0 8px 28px rgb(2 6 23 / 0.5);
+}
+
+.noc-login-wrap {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: radial-gradient(120% 90% at 50% 15%, #0f2447 0%, #060d1c 65%, #030712 100%);
+  color: #e2e8f0;
+}
+.noc-login-card {
+  width: min(410px, 94vw);
+  padding: 28px 26px;
+  border-radius: 20px;
+  background: rgb(15 23 42 / 0.88);
+  border: 1px solid rgb(56 189 248 / 0.35);
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.55), 0 0 28px rgb(14 165 233 / 0.16);
+  backdrop-filter: blur(14px);
+  display: grid;
+  gap: 12px;
+}
+.noc-login-badge {
+  display: inline-block;
+  width: max-content;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgb(56 189 248 / 0.16);
+  border: 1px solid rgb(56 189 248 / 0.4);
+  color: #38bdf8;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.noc-login-card h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  color: #fff;
+}
+.noc-login-card > p {
+  margin: 0 0 4px;
+  font-size: 0.84rem;
+  color: #94a3b8;
+  line-height: 1.45;
+}
+.noc-login-card label {
+  display: grid;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+.noc-login-card input {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgb(148 163 184 / 0.3);
+  background: rgb(2 6 23 / 0.75);
+  color: #fff;
+  font: inherit;
+  font-size: 0.9rem;
+}
+.noc-login-submit {
+  margin-top: 6px;
+  padding: 11px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: linear-gradient(120deg, #0284c7, #2563eb);
+  color: #fff;
+  font: 700 0.92rem/1 'Plus Jakarta Sans', system-ui, sans-serif;
+  cursor: pointer;
+}
+.noc-login-submit:hover {
+  filter: brightness(1.1);
+}
+
+.noc-radius-banner {
+  position: absolute;
+  top: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: rgb(153 27 27 / 0.94);
+  border: 1px solid #f87171;
+  color: #fff;
+  box-shadow: 0 10px 30px rgb(239 68 68 / 0.4);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+}
+.noc-radius-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.noc-radius-chips button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 0.35);
+  background: rgb(255 255 255 / 0.14);
+  color: #fff;
+  font: 600 0.75rem/1.2 'Plus Jakarta Sans', system-ui, sans-serif;
+  cursor: pointer;
+}
+.noc-radius-chips button:hover {
+  background: rgb(255 255 255 / 0.28);
+}
+
+.noc-bottom-right {
+  position: absolute;
+  right: 16px;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 4;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.noc-cam-dock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 999px;
+  background: rgb(8 15 32 / 0.88);
+  border: 1px solid rgb(56 189 248 / 0.3);
+  backdrop-filter: blur(8px);
+}
+.noc-cam-dock button {
+  min-width: 34px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.08);
+  color: #e0f2fe;
+  font: 700 0.82rem/1 'Plus Jakarta Sans', system-ui, sans-serif;
+  cursor: pointer;
+}
+.noc-cam-dock button:hover {
+  background: rgb(56 189 248 / 0.28);
+}
+.noc-cam-dock button.is-on {
+  background: #0284c7;
+  color: #fff;
+}
+.ko-gaya-inline {
+  position: relative;
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  font-size: 0.8125rem;
+}
+.ko-gaya-inline ul {
+  position: absolute;
+  bottom: 42px;
+  right: 0;
+  min-width: 210px;
+  display: grid;
+  gap: 2px;
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border-radius: 14px;
+  background: rgb(15 23 42 / 0.96);
+  border: 1px solid rgb(56 189 248 / 0.3);
+  color: #e2e8f0;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.45);
+}
+.ko-gaya-inline li button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ko-gaya-inline li button:hover {
+  background: rgb(56 189 248 / 0.16);
+}
+.ko-gaya-inline li button[aria-pressed='true'] {
+  background: #0284c7;
+  color: #fff;
+}
+.ko-gaya-inline li small {
+  opacity: 0.65;
+  font-size: 0.6875rem;
+}
+
+
+/* ---------- ADT Brand Logo Styling ---------- */
+.noc-hud-logo {
+  height: 30px;
+  width: auto;
+  padding: 2px 6px;
+  border-radius: 7px;
+  background: #ffffff;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+.noc-login-logo-box {
+  display: grid;
+  place-items: center;
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.noc-login-logo-box img {
+  max-height: 64px;
+  width: auto;
+  object-fit: contain;
+}
+
+
+/* ---------- Compact Unobtrusive 3D Agent Labels ---------- */
+.ko .ko-name {
+  min-height: 22px;
+  padding: 3px 8px 3px 6px;
+  gap: 5px;
+  font-size: 0.72rem;
+  line-height: 1.1;
+  border-radius: 7px;
+  box-shadow: 0 2px 8px rgb(2 6 23 / 0.42);
+}
+.ko .ko-name-main {
+  max-width: 138px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ko .ko-name-act {
+  font-size: 0.63rem;
+  max-width: 112px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.88;
+}
+.ko .ko-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+}
+.ko .ko-think {
+  min-width: 24px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 0.65rem;
+  border-radius: 999px;
+}
+.ko .ko-tag.is-ai-linked .ko-name {
+  border-color: rgb(34 211 238 / 0.9);
+  box-shadow: 0 0 12px rgb(34 211 238 / 0.45), 0 2px 8px rgb(2 6 23 / 0.5);
+}
+.ko .ko-tag.is-ai-linked .ko-think {
+  background: linear-gradient(120deg, #0284c7, #06b6d4);
+  color: #fff;
+}
+.ko .ko-bubble {
+  max-width: min(190px, 52vw);
+  padding: 5px 9px;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  border-radius: 10px 10px 10px 3px;
+}
+.ko .ko-bang {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  font-size: 0.75rem;
+}
+.ko .ko-urgent {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+.ko-board-pin {
+  padding: 2px 8px;
+  font-size: 0.58rem;
+}
+
+/* ---------- HUD Actions & Collapsible Mini Panel ---------- */
+.noc-hud-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+}
+.noc-hud-actions .noc-fleet-btn {
+  margin-left: 0;
+}
+.noc-btn-short {
+  display: none;
+}
+.noc-mini-header-btn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font: 700 0.72rem/1.2 'Plus Jakarta Sans', system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.ko-mini.is-open .noc-mini-header-btn {
+  margin-bottom: 8px;
+}
+.ko-mini.is-collapsed {
+  width: auto;
+  padding: 8px 12px;
+  border-radius: 999px;
+}
+
+/* ---------- Antigravity AI Console Panel ---------- */
+.noc-ai-box {
+  margin-top: 12px;
+  border: 1px solid #bae6fd;
+  border-radius: 12px;
+  background: #f0f9ff;
+  overflow: hidden;
+}
+.noc-ai-box.is-linked {
+  border-color: #0284c7;
+  box-shadow: 0 4px 16px rgb(2 132 199 / 0.14);
+}
+.noc-ai-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  margin: 0 !important;
+  padding: 10px 12px !important;
+  border-radius: 0 !important;
+  background: linear-gradient(120deg, #0c4a6e, #0369a1) !important;
+  color: #fff !important;
+  font-weight: 700 !important;
+  font-size: 0.83rem !important;
+}
+.noc-ai-toggle small {
+  font-weight: 500;
+  opacity: 0.85;
+}
+.noc-ai-body {
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+.noc-ai-brief {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #e0f2fe;
+  color: #0c4a6e;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+.noc-ai-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.noc-ai-chips button {
+  margin-top: 0 !important;
+  padding: 5px 9px !important;
+  border-radius: 999px !important;
+  background: #e0f2fe !important;
+  color: #0369a1 !important;
+  font-size: 0.72rem !important;
+  font-weight: 600 !important;
+}
+.noc-ai-chips button:hover {
+  background: #bae6fd !important;
+}
+.noc-ai-chat {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.noc-ai-msg {
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 0.76rem;
+  background: #ffffff;
+  border: 1px solid #e0f2fe;
+}
+.noc-ai-msg.is-user {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.noc-ai-msg.is-antigravity {
+  background: #ecfeff;
+  border-color: #67e8f9;
+}
+.noc-ai-msg-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: #475569;
+  margin-bottom: 3px;
+}
+.noc-ai-msg pre {
+  margin: 0;
+  font-family: inherit;
+  white-space: pre-wrap;
+  line-height: 1.42;
+  color: #0f172a;
+}
+.noc-ai-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.noc-ai-input-row input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid #bae6fd;
+  border-radius: 9px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 0.82rem;
+}
+.noc-ai-input-row button {
+  margin-top: 0 !important;
+  padding: 8px 14px !important;
+}
+
+/* ---------- Full Mobile Responsive Layout (<= 767px) ---------- */
+@media (max-width: 767px) {
+  .ko-hud {
+    padding: max(10px, env(safe-area-inset-top)) 10px 0;
+    gap: 8px;
+    align-items: center;
+  }
+  .ko-brand {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    gap: 7px;
+    border-radius: 14px;
+    flex-wrap: nowrap;
+  }
+  .noc-hud-logo {
+    height: 22px;
+    padding: 2px 4px;
+  }
+  .noc-brand-text {
+    min-width: 0;
+    flex: 1;
+  }
+  .noc-brand-text b {
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .noc-brand-text small {
+    display: none;
+  }
+  .noc-hud-actions {
+    gap: 4px;
+    margin-left: auto;
+  }
+  .noc-fleet-btn {
+    padding: 5px 8px;
+    font-size: 0.72rem;
+  }
+  .noc-btn-lbl {
+    display: none;
+  }
+  .noc-btn-short {
+    display: inline;
+  }
+  .ko-clock {
+    flex-shrink: 0;
+    padding: 4px 8px;
+    border-radius: 10px;
+    background: rgb(8 15 32 / 0.75);
+  }
+  .ko-clock b {
+    font-size: 1.05rem;
+  }
+  .ko-clock small {
+    display: none;
+  }
+
+  /* Keep 3D agent tags super compact & uncluttered on mobile screens */
+  .ko .ko-name {
+    min-height: 20px;
+    padding: 2px 6px 2px 5px;
+    font-size: 0.62rem;
+    gap: 4px;
+  }
+  .ko .ko-name-main {
+    max-width: 96px;
+  }
+  .ko .ko-name-act,
+  .ko .ko-bubble {
+    display: none;
+  }
+  .ko .ko-think {
+    min-width: 18px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 0.56rem;
+  }
+
+  .noc-radius-banner {
+    top: 58px;
+    width: calc(100vw - 20px);
+    padding: 7px 10px;
+    font-size: 0.74rem;
+    gap: 6px;
+  }
+  .noc-fleet-drawer {
+    top: 58px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-height: 68dvh;
+  }
+
+  /* Bottom HUD row: compact collapsible status on left, camera dock on right */
+  .ko-mini {
+    left: 10px;
+    right: auto;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    max-width: calc(100vw - 20px);
+  }
+  .ko-mini.is-open {
+    right: 10px;
+    width: auto;
+    z-index: 5;
+    padding: 12px;
+  }
+  .ko-mini dl {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+  .ko-mini dd {
+    font-size: 0.96rem;
+  }
+
+  .noc-bottom-right {
+    right: 10px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    gap: 6px;
+  }
+  .noc-cam-dock {
+    padding: 3px;
+    gap: 3px;
+  }
+  .noc-cam-dock button {
+    min-width: 32px;
+    height: 30px;
+    padding: 0 7px;
+    font-size: 0.74rem;
+  }
+  .ko-gaya-btn {
+    padding: 7px 10px;
+    font-size: 0.72rem;
+  }
+
+  /* Full-width bottom sheet modals on phones */
+  .ko-sheet-in {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    margin: 0 !important;
+    padding: 16px 14px max(18px, env(safe-area-inset-bottom)) !important;
+    border-radius: 20px 20px 0 0 !important;
+    max-height: 88dvh !important;
+  }
+  .noc-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .noc-iface-grid,
+  .noc-form-grid {
+    grid-template-columns: 1fr;
+  }
+  .noc-form-grid input,
+  .noc-form-grid select,
+  .noc-ai-input-row input,
+  .noc-login-card input {
+    font-size: 16px; /* Prevents iOS Safari auto-zoom on focus */
+  }
+}

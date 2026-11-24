@@ -1,0 +1,362 @@
+import { RouterOsClient, type RouterOsCommandOutcome } from './routerosClient.js';
+import { isRadiusTimeoutMessage } from './syslogReceiver.js';
+import type { InterfaceMetric, RouterDevice, RouterHealthStatus, RouterTelemetry, SyslogEntry } from './types.js';
+
+interface CounterSample {
+  readonly rxByte: number;
+  readonly txByte: number;
+  readonly timestampMs: number;
+}
+
+const interfaceCounterCache = new Map<string, CounterSample>();
+
+export function computeHealthStatus(
+  reachable: boolean,
+  cpuLoadPercent: number,
+  memoryUsedPercent: number,
+  temperatureC: number | null,
+): RouterHealthStatus {
+  if (!reachable) return 'offline';
+  if (cpuLoadPercent >= 90 || memoryUsedPercent >= 92 || (temperatureC !== null && temperatureC >= 75)) {
+    return 'critical';
+  }
+  if (cpuLoadPercent >= 75 || memoryUsedPercent >= 82 || (temperatureC !== null && temperatureC >= 65)) {
+    return 'warning';
+  }
+  return 'healthy';
+}
+
+export function parseSystemHealth(rows: readonly Record<string, string>[]): {
+  readonly temperatureC: number | null;
+  readonly voltageV: number | null;
+} {
+  let temperatureC: number | null = null;
+  let voltageV: number | null = null;
+
+  for (const row of rows) {
+    // RouterOS v7 format: { name: 'temperature' | 'cpu-temperature' | 'voltage', value: '45' }
+    const metricName = (row.name ?? '').toLowerCase();
+    if (metricName && row.value !== undefined) {
+      const parsedVal = Number.parseFloat(row.value);
+      if (!Number.isNaN(parsedVal)) {
+        if (metricName === 'temperature' || (metricName.includes('temperature') && temperatureC === null)) {
+          temperatureC = parsedVal;
+        } else if (metricName === 'voltage' && voltageV === null) {
+          voltageV = parsedVal;
+        }
+      }
+      continue;
+    }
+
+    // RouterOS v6 format: single row { temperature: '42', 'cpu-temperature': '44', voltage: '24.1' }
+    const rawTemp = row.temperature ?? row['cpu-temperature'];
+    if (rawTemp !== undefined && temperatureC === null) {
+      const t = Number.parseFloat(rawTemp);
+      if (!Number.isNaN(t)) temperatureC = t;
+    }
+    if (row.voltage !== undefined && voltageV === null) {
+      const v = Number.parseFloat(row.voltage);
+      if (!Number.isNaN(v)) voltageV = v;
+    }
+  }
+
+  return { temperatureC, voltageV };
+}
+
+export function computeDeltaMbps(prevBytes: number, currentBytes: number, elapsedMs: number): number {
+  if (elapsedMs <= 0 || currentBytes < prevBytes) {
+    return 0;
+  }
+  const deltaBits = (currentBytes - prevBytes) * 8;
+  const mbps = deltaBits / (elapsedMs * 1000);
+  return Number(Math.max(0, mbps).toFixed(2));
+}
+
+export function parsePppActiveCount(outcome: RouterOsCommandOutcome | undefined): number {
+  if (!outcome || !outcome.ok) return 0;
+  if (outcome.doneAttrs.ret !== undefined) {
+    const parsed = Number.parseInt(outcome.doneAttrs.ret, 10);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return outcome.rows.length;
+}
+
+export function parseBgpPeerStats(outcome: RouterOsCommandOutcome | undefined): {
+  readonly established: number;
+  readonly total: number;
+} {
+  if (!outcome || !outcome.ok) return { established: 0, total: 0 };
+  const total = outcome.rows.length;
+  const established = outcome.rows.filter(
+    (row) => row.established === 'true' || (row.state ?? '').toLowerCase() === 'established',
+  ).length;
+  return { established, total };
+}
+
+export function isDynamicSubscriberInterface(row: Readonly<Record<string, string>>): boolean {
+  if (row.dynamic === 'true') return true;
+  const name = (row.name ?? '').toLowerCase();
+  return (
+    name.startsWith('<pppoe-') ||
+    name.startsWith('<pptp-') ||
+    name.startsWith('<l2tp-') ||
+    name.startsWith('<ovpn-') ||
+    name.startsWith('<sstp-')
+  );
+}
+
+export function sortInterfaces(list: readonly InterfaceMetric[]): InterfaceMetric[] {
+  return [...list].sort((a, b) => {
+    if (a.running !== b.running) return a.running ? -1 : 1;
+    if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+    const bwDiff = b.rxMbps + b.txMbps - (a.rxMbps + a.txMbps);
+    if (Math.abs(bwDiff) > 0.05) return bwDiff;
+    const aSfp = a.name.toLowerCase().includes('sfp') ? 0 : 1;
+    const bSfp = b.name.toLowerCase().includes('sfp') ? 0 : 1;
+    if (aSfp !== bSfp) return aSfp - bSfp;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+export function parseRouterApiLogs(
+  router: RouterDevice,
+  rows: readonly Record<string, string>[],
+): readonly SyslogEntry[] {
+  const selfUser = router.readUsername.toLowerCase();
+  const recentRows = rows
+    .filter((row) => {
+      const msg = (row.message ?? '').trim();
+      if (!msg) return false;
+      // Filter noisy self-polling API login/logout entries so real RADIUS/PPPoE/error logs stand out
+      const lower = msg.toLowerCase();
+      if (lower.includes(`user ${selfUser} logged`) && lower.includes('via api')) {
+        return false;
+      }
+      return true;
+    })
+    .slice(-40)
+    .reverse();
+  const nowIso = new Date().toISOString();
+
+  return recentRows.map((row) => {
+      const message = (row.message ?? '').trim();
+      const rawTopics = (row.topics ?? 'system').toLowerCase().split(',').filter(Boolean);
+      let severity: SyslogEntry['severity'] = 'info';
+      if (isRadiusTimeoutMessage(message) || rawTopics.includes('critical')) {
+        severity = 'critical';
+      } else if (rawTopics.includes('error')) {
+        severity = 'error';
+      } else if (rawTopics.includes('warning')) {
+        severity = 'warning';
+      }
+
+      const idKey = row['.id'] ?? '';
+      const timeKey = row.time ?? '';
+      return {
+        id: `api:${router.id}:${idKey}:${timeKey}:${message.slice(0, 48)}`,
+        routerId: router.id,
+        sourceIp: router.host,
+        timestamp: nowIso,
+        topics: rawTopics.length > 0 ? rawTopics : ['system'],
+        severity,
+        message: timeKey ? `[${timeKey}] ${message}` : message,
+      };
+    });
+}
+
+export interface RouterPollResult {
+  readonly telemetry: RouterTelemetry;
+  readonly apiLogs: readonly SyslogEntry[];
+}
+
+export async function pollRouterTelemetry(
+  router: RouterDevice,
+  forceLive = false,
+  resolvedSecret?: string,
+): Promise<RouterTelemetry> {
+  const res = await pollRouterWithLogs(router, forceLive, resolvedSecret);
+  return res.telemetry;
+}
+
+export async function pollRouterWithLogs(
+  router: RouterDevice,
+  forceLive = false,
+  resolvedSecret?: string,
+): Promise<RouterPollResult> {
+  if (router.simulated && !forceLive) {
+    return { telemetry: generateSimulatedTelemetry(router), apiLogs: [] };
+  }
+
+  const secret =
+    (resolvedSecret !== undefined && resolvedSecret !== '' ? resolvedSecret : process.env[router.readSecretEnv]) ?? '';
+  if (!secret) {
+    return {
+      telemetry: {
+        routerId: router.id,
+        timestamp: new Date().toISOString(),
+        reachable: false,
+        uptime: '-',
+        version: router.routerOsVersion,
+        boardName: router.deviceModel ?? 'MikroTik',
+        cpuLoadPercent: 0,
+        memoryUsedPercent: 0,
+        temperatureC: null,
+        voltageV: null,
+        activePppoeCount: 0,
+        bgpPeersEstablished: 0,
+        bgpPeersTotal: 0,
+        interfaces: [],
+        status: 'offline',
+        lastError: `Password MikroTik belum diisi di GUI maupun ${router.readSecretEnv}`,
+      },
+      apiLogs: [],
+    };
+  }
+
+  const client = new RouterOsClient({
+    host: router.host,
+    port: router.port,
+    useTls: router.useTls,
+    username: router.readUsername,
+    secret,
+    timeoutMs: 5000,
+  });
+
+  try {
+    const bgpCommand =
+      router.routerOsVersion === 'v7' ? ['/routing/bgp/session/print'] : ['/routing/bgp/peer/print'];
+    const commands: string[][] = [
+      ['/system/resource/print'],
+      ['/interface/print'],
+      ['/ppp/active/print', '=count-only='],
+      ['/system/health/print'],
+      bgpCommand,
+      ['/log/print'],
+    ];
+    const outcomes = await client.connectAndRunTolerant(commands);
+    const [resOut, ifaceOut, pppOut, healthOut, bgpOut, logOut] = outcomes;
+
+    const res = resOut?.ok ? (resOut.rows[0] ?? {}) : {};
+    const cpuLoadPercent = Number(res['cpu-load'] ?? '0');
+    const totalMem = Number(res['total-memory'] ?? '1');
+    const freeMem = Number(res['free-memory'] ?? '0');
+    const memoryUsedPercent = totalMem > 0 ? Math.round(((totalMem - freeMem) / totalMem) * 100) : 0;
+
+    const nowMs = Date.now();
+    const rawInterfaces: InterfaceMetric[] = (ifaceOut?.ok ? ifaceOut.rows : [])
+      .filter((row) => !isDynamicSubscriberInterface(row))
+      .map((row) => {
+        const name = row.name ?? 'ether';
+        const rxByte = Number(row['rx-byte'] ?? '0');
+        const txByte = Number(row['tx-byte'] ?? '0');
+        const cacheKey = `${router.id}:${name}`;
+        const prev = interfaceCounterCache.get(cacheKey);
+        const rxMbps = prev ? computeDeltaMbps(prev.rxByte, rxByte, nowMs - prev.timestampMs) : 0;
+        const txMbps = prev ? computeDeltaMbps(prev.txByte, txByte, nowMs - prev.timestampMs) : 0;
+        interfaceCounterCache.set(cacheKey, { rxByte, txByte, timestampMs: nowMs });
+
+        return {
+          name,
+          running: row.running === 'true',
+          disabled: row.disabled === 'true',
+          rxMbps,
+          txMbps,
+        };
+      });
+    const interfaces = sortInterfaces(rawInterfaces).slice(0, 28);
+
+    const activePppoeCount = parsePppActiveCount(pppOut);
+    const { temperatureC, voltageV } = parseSystemHealth(healthOut?.ok ? healthOut.rows : []);
+    const bgp = parseBgpPeerStats(bgpOut);
+    const apiLogs = logOut?.ok ? parseRouterApiLogs(router, logOut.rows) : [];
+
+    return {
+      telemetry: {
+        routerId: router.id,
+        timestamp: new Date(nowMs).toISOString(),
+        reachable: true,
+        uptime: res.uptime ?? '0s',
+        version: res.version ?? router.routerOsVersion,
+        boardName: res['board-name'] ?? router.deviceModel ?? 'MikroTik',
+        cpuLoadPercent,
+        memoryUsedPercent,
+        temperatureC,
+        voltageV,
+        activePppoeCount,
+        bgpPeersEstablished: bgp.established,
+        bgpPeersTotal: bgp.total,
+        interfaces,
+        status: computeHealthStatus(true, cpuLoadPercent, memoryUsedPercent, temperatureC),
+      },
+      apiLogs,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Tidak dapat terhubung ke RouterOS API';
+    return {
+      telemetry: {
+        routerId: router.id,
+        timestamp: new Date().toISOString(),
+        reachable: false,
+        uptime: 'down',
+        version: router.routerOsVersion,
+        boardName: router.deviceModel ?? 'Unreachable',
+        cpuLoadPercent: 0,
+        memoryUsedPercent: 0,
+        temperatureC: null,
+        voltageV: null,
+        activePppoeCount: 0,
+        bgpPeersEstablished: 0,
+        bgpPeersTotal: 0,
+        interfaces: [],
+        status: 'offline',
+        lastError: message,
+      },
+      apiLogs: [],
+    };
+  }
+}
+
+function generateSimulatedTelemetry(router: RouterDevice): RouterTelemetry {
+  const wave = Math.sin(Date.now() / 20000 + router.deskX + router.deskZ);
+  const baseCpu = router.role === 'bras' ? 38 : router.role === 'core' ? 22 : 26;
+  const cpuLoadPercent = Math.max(5, Math.min(95, Math.round(baseCpu + wave * 10)));
+  const memoryUsedPercent = router.role === 'bras' ? 52 : router.role === 'core' ? 31 : 44;
+  const temperatureC = router.role === 'bras' ? 48 : router.role === 'core' ? 43 : 39;
+
+  const isCrs = router.name.toLowerCase().includes('crs');
+  const isCcr = router.name.toLowerCase().includes('ccr');
+
+  return {
+    routerId: router.id,
+    timestamp: new Date().toISOString(),
+    reachable: true,
+    uptime: '18d 06:42:10',
+    version: router.routerOsVersion === 'v7' ? '7.16.2 (stable)' : '6.49.17 (long-term)',
+    boardName: isCcr ? 'CCR2116-12G-4S+' : isCrs ? 'CRS326-24S+2Q+RM' : 'RB750Gr3',
+    cpuLoadPercent,
+    memoryUsedPercent,
+    temperatureC,
+    voltageV: isCrs ? 24.4 : isCcr ? 24.1 : 23.8,
+    activePppoeCount: router.role === 'bras' ? 485 : router.role === 'branch' ? 74 : 0,
+    bgpPeersEstablished: router.role === 'core' ? 2 : router.role === 'bras' ? 3 : 0,
+    bgpPeersTotal: router.role === 'core' ? 2 : router.role === 'bras' ? 3 : 0,
+    interfaces: isCrs
+      ? [
+          { name: 'sfp-sfpplus1-Uplink', running: true, disabled: false, rxMbps: 842.4, txMbps: 295.1 },
+          { name: 'sfp-sfpplus2-Ring', running: true, disabled: false, rxMbps: 410.8, txMbps: 405.3 },
+          { name: 'ether1-Mgmt', running: true, disabled: false, rxMbps: 4.2, txMbps: 2.1 },
+        ]
+      : isCcr
+        ? [
+            { name: 'sfp-sfpplus1-ISP', running: true, disabled: false, rxMbps: 1120.4, txMbps: 315.2 },
+            { name: 'sfp-sfpplus2-OLT-MomoNet', running: true, disabled: false, rxMbps: 298.5, txMbps: 1084.6 },
+            { name: 'ether1-Mgmt', running: true, disabled: false, rxMbps: 8.4, txMbps: 3.9 },
+          ]
+        : [
+            { name: 'ether1-WAN-Backbone', running: true, disabled: false, rxMbps: 145.6, txMbps: 32.8 },
+            { name: 'ether2-Client-PPPoE', running: true, disabled: false, rxMbps: 31.4, txMbps: 142.1 },
+            { name: 'ether5-Hotspot', running: true, disabled: false, rxMbps: 12.1, txMbps: 28.4 },
+          ],
+    status: computeHealthStatus(true, cpuLoadPercent, memoryUsedPercent, temperatureC),
+  };
+}
