@@ -150,6 +150,7 @@ export interface LiveAlertSettings {
   pingLossCritPct: number;
   pingConfirmCount?: number;
   pppoeMassDropCount?: number;
+  sfpRxCritDbm?: number;
   alertCooldownSec: number;
   waTokenConfigured: boolean;
 }

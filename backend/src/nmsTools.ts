@@ -156,6 +156,19 @@ export class NmsToolSuite {
     return Array.from(this.pendingActions.values());
   }
 
+  async refreshOlts(host?: string): Promise<Record<string, unknown>> {
+    return this.client.refreshOlt(host);
+  }
+
+  async getOnuDetail(
+    host: string,
+    mac: string,
+    index: string,
+    days: 'hour' | '1' | '7' = '7',
+  ): Promise<Record<string, unknown>> {
+    return this.client.getOnuDetail(host, mac, index, days);
+  }
+
   private pruneExpiredActions(): void {
     const now = Date.now();
     for (const [id, act] of this.pendingActions.entries()) {

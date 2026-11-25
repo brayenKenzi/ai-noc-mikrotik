@@ -207,7 +207,7 @@ export class ApprovalGateStore {
       .then(async () => {
         await fs.mkdir(path.dirname(this.persistPath), { recursive: true });
         const tmpPath = `${this.persistPath}.${crypto.randomUUID().slice(0, 8)}.tmp`;
-        await fs.writeFile(tmpPath, snapshotJson, 'utf8');
+        await fs.writeFile(tmpPath, snapshotJson, { encoding: 'utf8', mode: 0o600 });
         await fs.rename(tmpPath, this.persistPath);
       });
     return this.persistChain;

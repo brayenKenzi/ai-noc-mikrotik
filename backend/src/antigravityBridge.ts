@@ -511,6 +511,7 @@ export function buildDeterministicLiveReply(
  * all NOC agent reports, Hotspot/PPPoE/DHCP stats, Ping metrics, and pending approvals.
  */
 import type { FleetPatternSnapshot } from './spvReportComposer.js';
+import type { NmsNetworkHealthSummary } from './nmsTools.js';
 
 export interface SpvMemoryRetrieval {
   readonly relevantFacts: readonly AiLearnedFact[];
@@ -526,6 +527,7 @@ export async function generateSpvFleetAnswer(options: {
   readonly topologyLinks?: readonly LiveTopologyLink[];
   readonly memoryContext?: SpvMemoryRetrieval;
   readonly patternContext?: FleetPatternSnapshot;
+  readonly nmsSummary?: NmsNetworkHealthSummary | null;
   readonly question: string;
   readonly focusRouterId?: string;
 }): Promise<{ readonly reply: string; readonly source: string }> {
@@ -537,6 +539,7 @@ export async function generateSpvFleetAnswer(options: {
     topologyLinks = [],
     memoryContext,
     patternContext,
+    nmsSummary,
     question,
     focusRouterId,
   } = options;
@@ -562,6 +565,20 @@ export async function generateSpvFleetAnswer(options: {
     },
     externalInternetPings: externalPings,
     bandwidthUsagePatterns: patternContext ?? null,
+    adtMonitoringOltNms: nmsSummary
+      ? {
+          oltsReachable: `${nmsSummary.oltsReachable}/${nmsSummary.oltsTotal}`,
+          onlineOnus: nmsSummary.onlineOnus,
+          offlineOnus: nmsSummary.offlineOnus,
+          activeAlarmsCount: nmsSummary.activeAlarmsCount,
+          olts: nmsSummary.olts,
+          activeAlarms: nmsSummary.activeAlarms.slice(0, 10).map((a) => ({
+            kind: a.kind,
+            title: a.title,
+            detail: a.detail,
+          })),
+        }
+      : null,
     fiberTopologyMap: topologyLinks.map((l) => ({
       route: `${l.fromRouterName} (${l.fromInterface || 'port'}) -> ${l.toRouterName} (${l.toInterface || 'port'})`,
       label: l.label,

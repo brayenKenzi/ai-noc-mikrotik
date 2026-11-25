@@ -1345,8 +1345,10 @@ function AdminAccountModal({
   const [pingWarnMs, setPingWarnMs] = useState(String(alertSettings?.pingWarnMs ?? 50));
   const [pingCritMs, setPingCritMs] = useState(String(alertSettings?.pingCritMs ?? 100));
   const [extPingCritMs, setExtPingCritMs] = useState(String(alertSettings?.extPingCritMs ?? 150));
-  const [pingConfirmCount, setPingConfirmCount] = useState(String(alertSettings?.pingConfirmCount ?? 3));
-  const [cooldownMin, setCooldownMin] = useState(String(Math.round((alertSettings?.alertCooldownSec ?? 1800) / 60)));
+  const [pingConfirmCount, setPingConfirmCount] = useState(String(alertSettings?.pingConfirmCount ?? 4));
+  const [cooldownMin, setCooldownMin] = useState(String(Math.round((alertSettings?.alertCooldownSec ?? 3600) / 60)));
+  const [sfpRxCritDbm, setSfpRxCritDbm] = useState(String(alertSettings?.sfpRxCritDbm ?? -24));
+  const [pppoeMassDropCount, setPppoeMassDropCount] = useState(String(alertSettings?.pppoeMassDropCount ?? 15));
   const [waMsg, setWaMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const handleUpdate = async (e: React.FormEvent) => {
@@ -1378,8 +1380,10 @@ function AdminAccountModal({
         pingWarnMs: Math.max(5, Number(pingWarnMs) || 50),
         pingCritMs: Math.max(10, Number(pingCritMs) || 100),
         extPingCritMs: Math.max(20, Number(extPingCritMs) || 150),
-        pingConfirmCount: Math.max(1, Math.min(10, Number(pingConfirmCount) || 3)),
-        alertCooldownSec: Math.max(60, (Number(cooldownMin) || 30) * 60),
+        pingConfirmCount: Math.max(1, Math.min(10, Number(pingConfirmCount) || 4)),
+        alertCooldownSec: Math.max(60, (Number(cooldownMin) || 60) * 60),
+        sfpRxCritDbm: Math.max(-40, Math.min(-10, Number(sfpRxCritDbm) || -24)),
+        pppoeMassDropCount: Math.max(5, Math.min(500, Number(pppoeMassDropCount) || 15)),
       });
       setWaMsg({ ok: true, text: 'Filter anti-spam WA & Laporan Harian berhasil disimpan!' });
     } catch (err) {
@@ -1454,6 +1458,14 @@ function AdminAccountModal({
             <label>
               <span>Ping Waspada Dashboard (ms)</span>
               <input type="number" min={5} max={2000} value={pingWarnMs} onChange={(e) => setPingWarnMs(e.target.value)} />
+            </label>
+            <label>
+              <span>Batas Kritis SFP (dBm)</span>
+              <input type="number" step="0.5" min={-40} max={-10} value={sfpRxCritDbm} onChange={(e) => setSfpRxCritDbm(e.target.value)} />
+            </label>
+            <label>
+              <span>Ambang Mass-Drop PPPoE (user)</span>
+              <input type="number" min={5} max={500} value={pppoeMassDropCount} onChange={(e) => setPppoeMassDropCount(e.target.value)} />
             </label>
             <div className="noc-check-row" style={{ gridColumn: '1 / -1', margin: '2px 0' }}>
               <label>

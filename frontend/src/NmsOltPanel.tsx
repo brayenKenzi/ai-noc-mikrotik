@@ -79,16 +79,21 @@ export function NmsOltPanel() {
   const [searching, setSearching] = useState(false);
   const [customers, setCustomers] = useState<NmsCustomerItem[]>([]);
   const [wifiTarget, setWifiTarget] = useState<{ label: string; parsed: NmsWifiParsed } | null>(null);
+  const [rxHistoryTarget, setRxHistoryTarget] = useState<{ label: string; summary: string } | null>(null);
   const [wifiFormMac, setWifiFormMac] = useState<string | null>(null);
   const [newSsid, setNewSsid] = useState('');
   const [newPass, setNewPass] = useState('');
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const loadHealth = async () => {
+  const loadHealth = async (forceRefresh = false) => {
     setLoadingHealth(true);
     try {
-      const res = await fetch('/api/nms/health', { credentials: 'include' });
+      const res = await fetch(forceRefresh ? '/api/nms/refresh' : '/api/nms/health', {
+        method: forceRefresh ? 'POST' : 'GET',
+        credentials: 'include',
+        ...(forceRefresh ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) } : {}),
+      });
       const json = (await res.json()) as {
         success: boolean;
         data?: { configured: boolean; summary: NmsHealthSummary | null; pendingActions: NmsPendingActionItem[] };
@@ -100,10 +105,42 @@ export function NmsOltPanel() {
       setConfigured(Boolean(json.data?.configured));
       setSummary(json.data?.summary ?? null);
       setPendingActions(json.data?.pendingActions ?? []);
+      if (forceRefresh) {
+        setFeedback({ ok: true, text: '🔄 Refresh langsung ke semua OLT selesai!' });
+      }
     } catch (err) {
       setFeedback({ ok: false, text: err instanceof Error ? err.message : 'Gagal terhubung ke ADT Monitoring' });
     } finally {
       setLoadingHealth(false);
+    }
+  };
+
+  const handleCheckRxHistory = async (c: NmsCustomerItem) => {
+    const key = c.mac || c.index;
+    setBusyAction(`rx-${key}`);
+    setFeedback(null);
+    try {
+      const qs = new URLSearchParams({ host: c.oltHost, mac: c.mac, index: c.index, days: '7' });
+      const res = await fetch(`/api/nms/onu-detail?${qs.toString()}`, { credentials: 'include' });
+      const json = (await res.json()) as { success: boolean; data?: Record<string, unknown>; error?: string };
+      if (!res.ok || !json.success || !json.data) throw new Error(json.error ?? 'Gagal mengambil riwayat RX');
+      const samples = Array.isArray(json.data.history)
+        ? (json.data.history as Record<string, unknown>[])
+        : Array.isArray(json.data.samples)
+          ? (json.data.samples as Record<string, unknown>[])
+          : [];
+      const rxVals = samples
+        .map((s) => Number(s.rx))
+        .filter((n) => Number.isFinite(n));
+      const summaryTxt =
+        rxVals.length > 0
+          ? `${samples.length} sampel (7 hari) · Min ${Math.min(...rxVals).toFixed(2)} dBm · Maks ${Math.max(...rxVals).toFixed(2)} dBm · Terbaru ${rxVals[rxVals.length - 1]?.toFixed(2)} dBm`
+          : `Data detail ONU berhasil ditarik (${Object.keys(json.data).join(', ')})`;
+      setRxHistoryTarget({ label: `${c.name || c.mac} (${c.oltName} · ${c.index})`, summary: summaryTxt });
+    } catch (err) {
+      setFeedback({ ok: false, text: err instanceof Error ? err.message : 'Gagal membaca riwayat RX' });
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -258,8 +295,8 @@ export function NmsOltPanel() {
         <small style={{ color: '#475569' }}>
           📡 Terhubung via loopback lokal <code>127.0.0.1:8080</code> (OLT HiOSO/HSGQ + GenieACS TR-069)
         </small>
-        <button type="button" className="noc-btn-sim" disabled={loadingHealth} onClick={() => void loadHealth()}>
-          {loadingHealth ? 'Memuat…' : '🔄 Refresh OLT'}
+        <button type="button" className="noc-btn-sim" disabled={loadingHealth} onClick={() => void loadHealth(true)}>
+          {loadingHealth ? 'Memuat…' : '🔄 Refresh OLT Live'}
         </button>
       </div>
 
@@ -335,6 +372,18 @@ export function NmsOltPanel() {
 
       {feedback && <p className={`noc-feedback ${feedback.ok ? 'is-ok' : 'is-err'}`}>{feedback.text}</p>}
 
+      {rxHistoryTarget && (
+        <div className="noc-card" style={{ background: '#f0fdf4', borderColor: '#bbf7d0', marginBottom: '10px' }}>
+          <div className="noc-card-head">
+            <strong>📈 Riwayat RX 7 Hari: {rxHistoryTarget.label}</strong>
+            <button type="button" className="noc-link-btn" onClick={() => setRxHistoryTarget(null)}>
+              Tutup
+            </button>
+          </div>
+          <p style={{ margin: '4px 0 0', fontSize: '0.82rem', color: '#166534' }}>{rxHistoryTarget.summary}</p>
+        </div>
+      )}
+
       {wifiTarget && (
         <div className="noc-card" style={{ background: '#f0f9ff', borderColor: '#bae6fd', marginBottom: '10px' }}>
           <div className="noc-card-head">
@@ -384,6 +433,14 @@ export function NmsOltPanel() {
               {c.pppoeUsername ? ` · PPPoE: ${c.pppoeUsername} (${c.pppoeIp ?? '-'}) · Uptime ${c.pppoeUptime ?? '-'}` : ''}
             </p>
             <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
+              <button
+                type="button"
+                className="noc-btn-sim"
+                disabled={busyAction !== null}
+                onClick={() => void handleCheckRxHistory(c)}
+              >
+                {busyAction === `rx-${c.mac || c.index}` ? 'Memuat RX…' : '📈 Riwayat RX 7H'}
+              </button>
               <button
                 type="button"
                 className="noc-btn-sim"

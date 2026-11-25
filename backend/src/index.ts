@@ -781,6 +781,40 @@ export async function createNocServer() {
     }
   });
 
+  app.post('/api/nms/refresh', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const host = typeof req.body?.host === 'string' && req.body.host.trim() ? req.body.host.trim() : undefined;
+      await nmsTools.refreshOlts(host);
+      const { summary } = await nmsTools.cekGangguanJaringan();
+      res.json({
+        success: true,
+        data: { configured: true, summary, pendingActions: nmsTools.listPendingActions() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal refresh OLT ADT Monitoring';
+      res.status(502).json({ success: false, error: message });
+    }
+  });
+
+  app.get('/api/nms/onu-detail', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+      const mac = typeof req.query.mac === 'string' ? req.query.mac.trim() : '';
+      const index = typeof req.query.index === 'string' ? req.query.index.trim() : '';
+      const rawDays = typeof req.query.days === 'string' ? req.query.days.trim() : '7';
+      const days: 'hour' | '1' | '7' = rawDays === 'hour' || rawDays === '1' ? rawDays : '7';
+      if (!host || !mac || !index) {
+        res.status(400).json({ success: false, error: 'Parameter host, mac, dan index wajib diisi' });
+        return;
+      }
+      const detail = await nmsTools.getOnuDetail(host, mac, index, days);
+      res.json({ success: true, data: detail });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mengambil detail riwayat RX ONU';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
   app.post('/api/nms/actions/reboot', writeLimiter, requireAdmin, async (req, res) => {
     try {
       const { query } = NmsRebootSchema.parse(req.body ?? {});

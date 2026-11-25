@@ -374,6 +374,12 @@ export class NocOrchestrator {
     const pending = this.approvalStore.getAll().filter((a) => a.status === 'PENDING');
     const memoryContext = this.aiMemoryStore?.retrieveRelevantContext(question);
     const patternContext = this.trafficPatternLearner?.buildFleetPatternContext(snapshot.agents);
+    const nmsSummary = this.nmsTools?.isConfigured
+      ? await this.nmsTools
+          .cekGangguanJaringan()
+          .then((r) => r.summary)
+          .catch(() => null)
+      : null;
     const result = await generateSpvFleetAnswer({
       agents: snapshot.agents,
       externalPings: this.externalPings,
@@ -382,6 +388,7 @@ export class NocOrchestrator {
       topologyLinks: snapshot.topologyLinks,
       memoryContext,
       patternContext,
+      nmsSummary,
       question,
       focusRouterId,
     });
