@@ -327,91 +327,92 @@ export class RscBackupManager {
 
       const liveRouters = params.routers.filter((r) => !r.simulated);
       const prevById = new Map(this.state.entries.map((e) => [e.routerId, e]));
-      const nextEntries: RscBackupEntry[] = [];
 
-      for (const router of liveRouters) {
-        const fileName = toSafeRscFileName(router.name);
-        const latestFile = path.join(this.latestDir, fileName);
-        const secret = params.resolveSecret(router);
+      const rawResults = await Promise.all(
+        liveRouters.map(async (router): Promise<RscBackupEntry | null> => {
+          const fileName = toSafeRscFileName(router.name);
+          const latestFile = path.join(this.latestDir, fileName);
+          const secret = params.resolveSecret(router);
 
-        if (!secret) {
-          const prev = prevById.get(router.id);
-          if (prev) nextEntries.push(prev);
-          continue;
-        }
-
-        try {
-          const activeSpecs = RSC_SECTIONS.filter((s) =>
-            router.routerOsVersion === 'v7' ? !s.v6Only : !s.v7Only,
-          );
-          const commands: string[][] = [['/system/resource/print'], ...activeSpecs.map((s) => [s.apiPath])];
-          const outcomes = await params.pool.runTolerant(
-            router.id,
-            {
-              host: router.host,
-              port: router.port,
-              useTls: router.useTls,
-              username: router.readUsername,
-              secret,
-              timeoutMs: 8000,
-            },
-            commands,
-          );
-
-          const resOut = outcomes[0];
-          if (!resOut?.ok) {
-            throw new Error(resOut?.error ?? 'Router tidak merespons');
+          if (!secret) {
+            return prevById.get(router.id) ?? null;
           }
-          const boardInfo = resOut.rows[0] ?? {};
-          const sectionData = activeSpecs.map((spec, idx) => ({
-            cliPath: spec.cliPath,
-            singleton: spec.singleton,
-            rows: outcomes[idx + 1]?.ok ? outcomes[idx + 1]!.rows : [],
-          }));
 
-          const rscContent = buildRscFromSectionRows(router, boardInfo, sectionData);
-          let previousContent: string | null = null;
           try {
-            previousContent = await fs.readFile(latestFile, 'utf8');
-          } catch {
-            previousContent = null;
+            const activeSpecs = RSC_SECTIONS.filter((s) =>
+              router.routerOsVersion === 'v7' ? !s.v6Only : !s.v7Only,
+            );
+            const commands: string[][] = [['/system/resource/print'], ...activeSpecs.map((s) => [s.apiPath])];
+            const outcomes = await params.pool.runTolerant(
+              router.id,
+              {
+                host: router.host,
+                port: router.port,
+                useTls: router.useTls,
+                username: router.readUsername,
+                secret,
+                timeoutMs: 5500,
+              },
+              commands,
+            );
+
+            const resOut = outcomes[0];
+            if (!resOut?.ok) {
+              throw new Error(resOut?.error ?? 'Router tidak merespons');
+            }
+            const boardInfo = resOut.rows[0] ?? {};
+            const sectionData = activeSpecs.map((spec, idx) => ({
+              cliPath: spec.cliPath,
+              singleton: spec.singleton,
+              rows: outcomes[idx + 1]?.ok ? outcomes[idx + 1]!.rows : [],
+            }));
+
+            const rscContent = buildRscFromSectionRows(router, boardInfo, sectionData);
+            let previousContent: string | null = null;
+            try {
+              previousContent = await fs.readFile(latestFile, 'utf8');
+            } catch {
+              previousContent = null;
+            }
+
+            const diff = computeRscDiff(previousContent, rscContent);
+            await fs.writeFile(latestFile, rscContent, { encoding: 'utf8', mode: 0o600 });
+            await fs.writeFile(path.join(dayHistoryDir, fileName), rscContent, { encoding: 'utf8', mode: 0o600 });
+
+            return {
+              routerId: router.id,
+              routerName: router.name,
+              fileName,
+              folderPath: `mikrotik-rsc/latest/${fileName}`,
+              lastBackupAt: now.toISOString(),
+              sizeBytes: Buffer.byteLength(rscContent, 'utf8'),
+              lineCount: rscContent.split('\n').length,
+              addedLines: diff.addedLines,
+              removedLines: diff.removedLines,
+              diffPreview: diff.diffPreview,
+              status: previousContent !== null && diff.addedLines === 0 && diff.removedLines === 0 ? 'unchanged' : 'ok',
+            };
+          } catch (err) {
+            const prev = prevById.get(router.id);
+            return {
+              routerId: router.id,
+              routerName: router.name,
+              fileName,
+              folderPath: `mikrotik-rsc/latest/${fileName}`,
+              lastBackupAt: prev?.lastBackupAt ?? now.toISOString(),
+              sizeBytes: prev?.sizeBytes ?? 0,
+              lineCount: prev?.lineCount ?? 0,
+              addedLines: 0,
+              removedLines: 0,
+              diffPreview: prev?.diffPreview ?? [],
+              status: 'error',
+              error: err instanceof Error ? err.message : 'Gagal menarik konfigurasi',
+            };
           }
+        }),
+      );
 
-          const diff = computeRscDiff(previousContent, rscContent);
-          await fs.writeFile(latestFile, rscContent, { encoding: 'utf8', mode: 0o600 });
-          await fs.writeFile(path.join(dayHistoryDir, fileName), rscContent, { encoding: 'utf8', mode: 0o600 });
-
-          nextEntries.push({
-            routerId: router.id,
-            routerName: router.name,
-            fileName,
-            folderPath: `mikrotik-rsc/latest/${fileName}`,
-            lastBackupAt: now.toISOString(),
-            sizeBytes: Buffer.byteLength(rscContent, 'utf8'),
-            lineCount: rscContent.split('\n').length,
-            addedLines: diff.addedLines,
-            removedLines: diff.removedLines,
-            diffPreview: diff.diffPreview,
-            status: previousContent !== null && diff.addedLines === 0 && diff.removedLines === 0 ? 'unchanged' : 'ok',
-          });
-        } catch (err) {
-          const prev = prevById.get(router.id);
-          nextEntries.push({
-            routerId: router.id,
-            routerName: router.name,
-            fileName,
-            folderPath: `mikrotik-rsc/latest/${fileName}`,
-            lastBackupAt: prev?.lastBackupAt ?? now.toISOString(),
-            sizeBytes: prev?.sizeBytes ?? 0,
-            lineCount: prev?.lineCount ?? 0,
-            addedLines: 0,
-            removedLines: 0,
-            diffPreview: prev?.diffPreview ?? [],
-            status: 'error',
-            error: err instanceof Error ? err.message : 'Gagal menarik konfigurasi',
-          });
-        }
-      }
+      const nextEntries: RscBackupEntry[] = rawResults.filter((e): e is RscBackupEntry => e !== null);
 
       await this.pruneOldHistoryDirs(30);
 

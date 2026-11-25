@@ -447,7 +447,8 @@ export class NocOrchestrator {
     if (router.readPasswordEnc) {
       return this.secretVault ? this.secretVault.decrypt(router.readPasswordEnc) : router.readPasswordEnc;
     }
-    return undefined;
+    const envSecret = (process.env[router.readSecretEnv] ?? process.env.MT_READ_SECRET ?? '').trim();
+    return envSecret || undefined;
   }
 
   async addRouter(input: NewRouterInput): Promise<RouterDevice> {
