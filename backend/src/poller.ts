@@ -151,6 +151,12 @@ export function parseRouterApiLogs(
       if (lower.includes(`user ${selfUser} logged`) && lower.includes('via api')) {
         return false;
       }
+      // Ignore historical RouterOS logs from previous days (`nov/24 15:51:58`) or pre-NTP boot (`feb/01/1970 00:00:39`).
+      // Live today logs in MikroTik `/log/print` use pure `HH:MM:SS` timestamps.
+      const timeStr = (row.time ?? '').trim();
+      if (timeStr && (/1970|20\d{2}/.test(timeStr) || /^[a-z]{3}\/\d{1,2}\b/i.test(timeStr))) {
+        return false;
+      }
       return true;
     })
     .slice(-60)

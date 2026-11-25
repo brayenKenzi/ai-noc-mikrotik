@@ -1096,5 +1096,14 @@ describe('Human-in-the-Loop Approval Store & Deterministic Agent Diagnosis', () 
       message: 'login failure for user admin from 192.168.88.50 via winbox',
     };
     assert.equal(deterministicDiagnosis(crs, upTel, [lanTypoLog]).requiresAction, false);
+
+    // Case 5: parseRouterApiLogs must filter out 1970 boot & previous-day logs, keeping only live HH:MM:SS logs
+    const parsedLogs = parseRouterApiLogs(crs, [
+      { '.id': '*1', time: 'feb/01/1970 00:00:39', topics: 'system,error,critical', message: 'router was rebooted without proper shutdown' },
+      { '.id': '*2', time: 'nov/24 15:51:58', topics: 'system,info', message: 'system time zone settings changed' },
+      { '.id': '*3', time: '23:31:15', topics: 'system,info', message: 'user admin logged in' },
+    ]);
+    assert.equal(parsedLogs.length, 1);
+    assert.ok(parsedLogs[0]?.message.includes('23:31:15'));
   });
 });

@@ -1368,13 +1368,13 @@ export class NocOrchestrator {
     }
     if (fresh.length === 0) return;
 
+    // On the very first /log/print after server boot, ONLY bookmark existing IDs in seenLogIds
+    // and DO NOT load old pre-boot buffer logs into dashboard UI, Insiden Aktif, or AI context!
+    if (isInitialSeed) return;
+
     const prev = this.logsMap.get(routerId) ?? [];
     this.logsMap.set(routerId, [...fresh, ...prev].slice(0, 60));
     this.globalLogs = [...fresh, ...this.globalLogs].slice(0, MAX_GLOBAL_LOGS);
-
-    // On the very first /log/print after server boot, seed historical MikroTik buffer logs into UI
-    // WITHOUT triggering ghost approval tickets or alerts for days-old events!
-    if (isInitialSeed) return;
 
     const freshRadius = fresh.filter((e) => isRadiusTimeoutMessage(e.message));
     const hasRadiusOrAnomaly = freshRadius.length > 0 || fresh.some((e) => isAnomalySyslog(e));
@@ -1501,9 +1501,14 @@ export class NocOrchestrator {
       const duty = resolveRouterDutyProfile(r);
       const history = this.historyMap.get(r.id) ?? [];
       const logs = this.logsMap.get(r.id) ?? [];
+      const nowMs = Date.now();
+      const freshLogs = logs.filter((l) => {
+        const ts = Date.parse(l.timestamp);
+        return Number.isNaN(ts) || nowMs - ts <= 15 * 60_000;
+      });
       const pending = this.approvalStore.getPendingForRouter(r.id);
 
-      const radiusLogs = logs.filter((l) => isRadiusTimeoutMessage(l.message));
+      const radiusLogs = freshLogs.filter((l) => isRadiusTimeoutMessage(l.message));
       const radiusTimeoutCount = radiusLogs.length;
       if (radiusLogs[0]) {
         const failedUser = parseRadiusTimeoutUser(radiusLogs[0].message) ?? 'unknown';
@@ -1518,7 +1523,7 @@ export class NocOrchestrator {
         });
       }
 
-      const hotspotFailures = logs
+      const hotspotFailures = freshLogs
         .map((l) => parseHotspotFailedLogin(l))
         .filter((x): x is string => x !== null);
       const hotspotFailedLoginCount = hotspotFailures.length;
@@ -1574,7 +1579,7 @@ export class NocOrchestrator {
       } else if (tel?.status === 'critical') {
         mendesak.push(`CPU ${tel.cpuLoadPercent}% / RAM ${tel.memoryUsedPercent}% kritis!`);
       }
-      const critLogs = logs
+      const critLogs = freshLogs
         .filter((l) => !isRadiusTimeoutMessage(l.message) && (l.severity === 'critical' || l.severity === 'error'))
         .slice(0, 2);
       for (const cl of critLogs) {
