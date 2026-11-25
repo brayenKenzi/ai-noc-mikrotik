@@ -2163,11 +2163,22 @@ function SpvNocCommandModal({
                 disabled={busy}
                 onClick={() =>
                   void sendPrompt(
-                    'Cek status seluruh link backbone CRS-BB01..03, suplai ethernet/SFP, serta trafik dan ping internet melalui vlan2000-CMK di CORE MONGKONAI sekarang.',
+                    'Cek redaman optik SFP (dBm) di semua CRS Backbone serta status link dan ping VLAN utama sekarang.',
                   )
                 }
               >
-                🔗 Link Backbone &amp; vlan2000
+                🌅 Redaman SFP Semua CRS
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void sendPrompt(
+                    'Analisa pola pemakaian bandwidth dan koneksi pelanggan jam ini dibandingkan rata-rata normal beserta kesimpulan SPV AI.',
+                  )
+                }
+              >
+                📈 Pola Bandwidth &amp; Kesimpulan AI
               </button>
               <button
                 type="button"

@@ -291,8 +291,10 @@ export async function pollRouterWithLogs(
         const txMbps = prev ? computeDeltaMbps(prev.txByte, txByte, nowMs - prev.timestampMs) : 0;
         interfaceCounterCache.set(cacheKey, { rxByte, txByte, timestampMs: nowMs });
 
+        const defaultName = row['default-name'];
         return {
           name,
+          ...(defaultName ? { defaultName } : {}),
           running: row.running === 'true',
           disabled: row.disabled === 'true',
           rxMbps,

@@ -68,15 +68,21 @@ export async function pollRouterSfpOptics(
   interfaces: readonly InterfaceMetric[],
   critDbm = -24,
 ): Promise<readonly SfpOpticalMetric[]> {
+  // Match BOTH display name AND hardware default-name (e.g. sfp1, sfp-sfpplus1, combo1, qsfp)
+  // so renamed backbone ports on ANY CRS switch (Kotobangon, Bangomolunow, Lolan, Mongkonai) are always monitored!
   const sfpNames = interfaces
-    .filter((i) => !i.disabled && /sfp/i.test(i.name))
+    .filter((i) => !i.disabled && (/sfp|combo|qsfp/i.test(i.name) || /sfp|combo|qsfp/i.test(i.defaultName ?? '')))
     .map((i) => i.name)
     .slice(0, 16);
 
   if (sfpNames.length === 0) return [];
 
+  const sfpConnOpts: RouterOsConnectionOptions = {
+    ...connOpts,
+    timeoutMs: Math.max(connOpts.timeoutMs ?? 6000, 7500),
+  };
   const commands = sfpNames.map((n) => ['/interface/ethernet/monitor', `=numbers=${n}`, '=once=']);
-  const outcomes = await pool.runTolerant(router.id, connOpts, commands);
+  const outcomes = await pool.runTolerant(router.id, sfpConnOpts, commands);
 
   const warnDbm = Math.max(critDbm + 3.5, -20);
   const metrics: SfpOpticalMetric[] = [];

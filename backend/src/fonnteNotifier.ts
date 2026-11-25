@@ -20,8 +20,10 @@ const DEFAULT_ALERT_SETTINGS: AlertSettings = {
   pingLossCritPct: 40,
   pingConfirmCount: 3,
   sfpRxCritDbm: -24,
-  alertCooldownSec: 1800, // 30 minutes anti-spam cooldown for repeated critical alerts
+  alertCooldownSec: 3600, // 60 minutes anti-spam cooldown per incident
 };
+
+const MIN_GLOBAL_DISPATCH_GAP_MS = 20 * 60 * 1000; // Minimum 20 minutes between automatic WA incident reports
 
 function localDateKey(date = new Date()): string {
   const y = date.getFullYear();
@@ -42,6 +44,7 @@ export class FonnteWhatsappNotifier {
   private settings: AlertSettings;
   private readonly lastSentMap = new Map<string, number>();
   private readonly activeIncidentKeys = new Set<string>();
+  private lastGlobalDispatchMs = 0;
 
   constructor(dataDir: string, token: string, defaultTarget: string, envWarnMs?: number, envCritMs?: number) {
     this.token = token.trim();
@@ -113,21 +116,73 @@ export class FonnteWhatsappNotifier {
     await this.persist();
   }
 
+  canDispatchIncidentKey(incidentKey: string, now = Date.now()): boolean {
+    const cooldownMs = Math.max(300, this.settings.alertCooldownSec) * 1000;
+    const lastSent = this.lastSentMap.get(incidentKey) ?? 0;
+    return now - lastSent >= cooldownMs;
+  }
+
+  canDispatchGlobalAutoAlert(now = Date.now()): boolean {
+    if (this.lastGlobalDispatchMs === 0) return true;
+    // Only enforce global gap when cooldown >= 600s (production anti-spam; keeps unit tests fast when cooldown is small)
+    if (this.settings.alertCooldownSec < 600) return true;
+    return now - this.lastGlobalDispatchMs >= MIN_GLOBAL_DISPATCH_GAP_MS;
+  }
+
+  markIncidentActive(incidentKey: string, now = Date.now()): void {
+    this.lastSentMap.set(incidentKey, now);
+    this.activeIncidentKeys.add(incidentKey);
+  }
+
   async sendAlertWithCooldown(incidentKey: string, message: string): Promise<boolean> {
     if (!this.settings.waEnabled || !this.isConfigured) {
       return false;
     }
     const now = Date.now();
-    const cooldownMs = Math.max(60, this.settings.alertCooldownSec) * 1000;
-    const lastSent = this.lastSentMap.get(incidentKey) ?? 0;
-    if (now - lastSent < cooldownMs) {
+    if (!this.canDispatchIncidentKey(incidentKey, now)) {
       this.activeIncidentKeys.add(incidentKey);
       return false;
     }
-    this.lastSentMap.set(incidentKey, now);
-    this.activeIncidentKeys.add(incidentKey);
+    if (!this.canDispatchGlobalAutoAlert(now)) {
+      return false;
+    }
+    this.markIncidentActive(incidentKey, now);
+    this.lastGlobalDispatchMs = now;
     const res = await this.sendRaw(this.settings.waTarget, message);
     return res.ok;
+  }
+
+  async sendBundledAlerts(incidentKeys: readonly string[], message: string): Promise<boolean> {
+    if (!this.settings.waEnabled || !this.isConfigured || incidentKeys.length === 0) {
+      return false;
+    }
+    const now = Date.now();
+    const freshKeys = incidentKeys.filter((k) => this.canDispatchIncidentKey(k, now));
+    if (freshKeys.length === 0) {
+      for (const k of incidentKeys) this.activeIncidentKeys.add(k);
+      return false;
+    }
+    if (!this.canDispatchGlobalAutoAlert(now)) {
+      return false;
+    }
+    for (const k of incidentKeys) {
+      this.markIncidentActive(k, now);
+    }
+    this.lastGlobalDispatchMs = now;
+    const res = await this.sendRaw(this.settings.waTarget, message);
+    return res.ok;
+  }
+
+  consumeActiveRecoveryKeys(incidentKeys: readonly string[]): string[] {
+    const matched: string[] = [];
+    for (const k of incidentKeys) {
+      if (this.activeIncidentKeys.has(k)) {
+        this.activeIncidentKeys.delete(k);
+        this.lastSentMap.delete(k);
+        matched.push(k);
+      }
+    }
+    return matched;
   }
 
   async sendRecoveryIfActive(incidentKey: string, recoveryMessage: string): Promise<boolean> {
@@ -153,12 +208,18 @@ export class FonnteWhatsappNotifier {
     }
     const hh = String(this.settings.dailyReportHour).padStart(2, '0');
     const text = [
-      `👑 SPV NOC — TES NOTIFIKASI WHATSAPP (MODE ANTI-SPAM)`,
-      `Halo Boss! Notifikasi WA kini sudah difilter ketat agar tidak mengganggu:`,
-      `• LAPORAN HARIAN: 1x setiap hari pukul ${hh}:00`,
-      `• ALERT SEGERA: HANYA gangguan KRITIS terkonfirmasi ${this.settings.pingConfirmCount}x berturut-turut (Router Offline, Ping Router ≥ ${this.settings.pingCritMs}ms / Internet ≥ ${this.settings.extPingCritMs}ms / Loss ≥ ${this.settings.pingLossCritPct}%, RADIUS Timeout, CPU/Suhu Kritis)`,
-      `• JEDA ANTI-SPAM: ${Math.round(this.settings.alertCooldownSec / 60)} menit per insiden`,
-      `Waktu: ${new Date().toLocaleString('id-ID')}`,
+      `TES KONEKSI WHATSAPP — SPV NOC`,
+      `${new Date().toLocaleString('id-ID')}`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `PENGATURAN FILTER PINTAR AKTIF`,
+      `• Laporan Harian    : 1x sehari pukul ${hh}.00 WITA`,
+      `• Verifikasi Tes    : Wajib cek ulang aktif sebelum kirim alert`,
+      `• Pola Bandwidth    : Trafik turun malam hari diabaikan otomatis`,
+      `• Jeda Anti-Spam    : Minimal 20 menit antar pesan & 60 menit per insiden`,
+      ``,
+      `KESIMPULAN SPV AI`,
+      `Jalur komunikasi WhatsApp Fonnte siap mengirim laporan rapi yang sudah diverifikasi dan disimpulkan oleh SPV AI.`,
     ].join('\n');
     return this.sendRaw(target, text);
   }

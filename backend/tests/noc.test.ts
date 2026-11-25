@@ -33,6 +33,11 @@ import {
   computeRscDiff,
   toSafeRscFileName,
 } from '../src/rscBackupManager.js';
+import { TrafficPatternLearner } from '../src/trafficPatternLearner.js';
+import {
+  composeSpvExecutiveReport,
+  composeSpvVerifiedIncidentReport,
+} from '../src/spvReportComposer.js';
 import {
   executeApprovedProposal,
   hasWriteCredentialsForRouter,
@@ -691,19 +696,43 @@ describe('Human-in-the-Loop Approval Store & Deterministic Agent Diagnosis', () 
     const bimaProfile = resolveRouterDutyProfile(bima);
     assert.equal(bimaProfile.dutyRole, 'backbone_master');
 
-    // Traffic drop watchdog on vlan2000-CMK (needs baseline >= 6 samples, then 5x sustained drop -> fires once!)
+    // Smart traffic drop watchdog on vlan2000-CMK:
+    // - Normal dip (200 Mbps -> 25 Mbps) or nighttime quiet hours (01:30) must NOT trigger false alarm!
+    // - True frozen-link collapse (200 Mbps -> 0.2 Mbps during active daytime 14:00) fires once after 6 checks!
+    const daytime = new Date(2026, 10, 25, 14, 0, 0);
+    const nightQuiet = new Date(2026, 10, 25, 1, 30, 0);
     const watchdog = new LinkWatchdogEngine();
     for (let i = 0; i < 8; i++) {
-      const { events } = watchdog.evaluateRouterInterfaces(coreM, [
-        { name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 120, txMbps: 80 },
-      ]);
+      const { events } = watchdog.evaluateRouterInterfaces(
+        coreM,
+        [{ name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 120, txMbps: 80 }],
+        3,
+        undefined,
+        daytime,
+      );
       assert.equal(events.length, 0);
     }
+    // Nighttime quiet drop to 0.3 Mbps at 01:30 -> 0 alerts!
+    for (let i = 0; i < 7; i++) {
+      const { events } = watchdog.evaluateRouterInterfaces(
+        coreM,
+        [{ name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 0.2, txMbps: 0.1 }],
+        3,
+        undefined,
+        nightQuiet,
+      );
+      assert.equal(events.length, 0);
+    }
+    // Daytime frozen collapse to 0.2 Mbps at 14:00 -> fires once on 6th check!
     let firedDrop = 0;
     for (let i = 0; i < 6; i++) {
-      const { events } = watchdog.evaluateRouterInterfaces(coreM, [
-        { name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 15, txMbps: 10 },
-      ]);
+      const { events } = watchdog.evaluateRouterInterfaces(
+        coreM,
+        [{ name: 'vlan2000-CMK', running: true, disabled: false, rxMbps: 0.1, txMbps: 0.1 }],
+        3,
+        undefined,
+        daytime,
+      );
       firedDrop += events.filter((e) => e.kind === 'drop').length;
     }
     assert.equal(firedDrop, 1);
@@ -937,5 +966,75 @@ describe('Human-in-the-Loop Approval Store & Deterministic Agent Diagnosis', () 
     const diff = computeRscDiff(rsc1, rsc2);
     assert.equal(diff.addedLines, 2);
     assert.equal(diff.removedLines, 0);
+  });
+
+  it('decodes TCP-fragmented CRS106 SFP sentences, learns 24h traffic patterns, and composes neat SPV AI reports', async () => {
+    // 1. TCP-fragmented RouterOS binary sentence must NEVER drop leading !re words
+    const fullPacket = Buffer.concat([
+      encodeSentence([
+        '!re',
+        '=name=sfp2-LOLAN',
+        '=status=link-ok',
+        '=sfp-module-present=true',
+        '=sfp-rx-power=-21.87',
+        '=sfp-tx-power=-3.079',
+        '=sfp-vendor-name=OEM',
+      ]),
+      encodeSentence(['!done']),
+    ]);
+    let buf: Buffer = Buffer.alloc(0);
+    const collected: string[][] = [];
+    // Feed in tiny 11-byte TCP fragments!
+    for (let pos = 0; pos < fullPacket.length; pos += 11) {
+      buf = Buffer.concat([buf, fullPacket.subarray(pos, Math.min(fullPacket.length, pos + 11))]);
+      const { sentences, remaining } = decodeWordsFromBuffer(buf);
+      buf = remaining;
+      collected.push(...sentences);
+    }
+    assert.equal(collected.length, 2);
+    assert.equal(collected[0]?.[0], '!re');
+    const attrs = parseSentenceAttributes(collected[0]!);
+    assert.equal(attrs['sfp-rx-power'], '-21.87');
+
+    // 2. TrafficPatternLearner & Neat SPV AI Report Composer with custom router & agent names
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'noc-pattern-test-'));
+    const learner = new TrafficPatternLearner(tmpDir);
+    await learner.init();
+    assert.equal(learner.isNormalBandwidthPattern('core-mongkonai', 'vlan2000-CMK', 0.4, new Date(2026, 10, 25, 2, 0, 0)), true);
+    assert.equal(learner.isNormalBandwidthPattern('core-mongkonai', 'vlan2000-CMK', 18, new Date(2026, 10, 25, 19, 0, 0)), true);
+
+    const incReport = await composeSpvVerifiedIncidentReport({
+      incidents: [
+        {
+          key: 'linkdown:crs-backbone-03:sfp2-LOLAN',
+          category: 'link',
+          routerId: 'crs-backbone-03',
+          routerName: 'CRS-Bangomolunow',
+          agentName: 'Bayu (CRS Bango)',
+          headline: 'Link fisik sfp2-LOLAN pada CRS-Bangomolunow PUTUS / DOWN',
+          verificationNote: 'Tes ulang API memastikan port sfp2-LOLAN masih DOWN',
+          detectedAt: new Date().toISOString(),
+        },
+      ],
+      agents: [],
+      topologyLinks: [],
+    });
+    assert.ok(incReport.includes('CRS-Bangomolunow'));
+    assert.ok(incReport.includes('Bayu (CRS Bango)'));
+    assert.ok(incReport.includes('KESIMPULAN ANALISA SPV AI'));
+    assert.ok(!incReport.includes('*'));
+
+    const execReport = await composeSpvExecutiveReport({
+      agents: [],
+      externalPings: [{ target: '1.1.1.1', label: 'Cloudflare', minMs: 35, avgMs: 38, maxMs: 42, packetLossPercent: 0, status: 'ok', updatedAt: new Date().toISOString() }],
+      reports: [],
+      isDailyReport: true,
+      useAiConclusion: false,
+    });
+    assert.ok(execReport.includes('LAPORAN HARIAN SPV NOC'));
+    assert.ok(execReport.includes('KESIMPULAN ANALISA SPV AI'));
+    assert.ok(!execReport.includes('*'));
+
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 });

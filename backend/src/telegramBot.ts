@@ -203,20 +203,20 @@ export class TelegramNocBot {
           ``,
           `ANDA BISA LANGSUNG CHAT APA SAJA, MISALNYA:`,
           `• "Berapa user hotspot dan PPPoE aktif sekarang?"`,
-          `• "Cek kondisi CCR MomoNet dan QairenNet"`,
-          `• "Apakah ada user hotspot yang gagal login?"`,
+          `• "Cek redaman SFP semua CRS Backbone"`,
+          `• "Cek pola pemakaian bandwidth jam ini"`,
           `• "Cek ping semua router dan 1.1.1.1"`,
           ``,
           `PERINTAH CEPAT:`,
           `• /cek <nama/ip/mac> — Cek sesi PPPoE/Hotspot pelanggan live`,
-          `• /sfp — Cek redaman optik modul SFP (RX/TX dBm)`,
+          `• /sfp — Cek redaman optik modul SFP semua CRS (dBm)`,
           `• /backup_rsc — Backup file .rsc semua MikroTik ke folder mikrotik-rsc/`,
-          `• /status — Laporan ringkas semua router live`,
-          `• /links — Cek semua link Backbone CRS & vlan2000-CMK`,
+          `• /status — Laporan rapi & kesimpulan SPV AI semua router`,
+          `• /links — Cek semua link Backbone CRS & VLAN Core`,
           `• /topologi — Cek jalur kabel fiber manual Anda`,
-          `• /ping — Cek ping router, vlan2000 & internet`,
+          `• /ping — Cek ping router, VLAN & internet`,
           `• /hotspot — Cek user hotspot & gagal login`,
-          `• /anomali — Cek semua anomali & mass-disconnect PPPoE`,
+          `• /anomali — Cek anomali aktif & mass-disconnect PPPoE`,
           `• /ingat <info> — Ajari SPV NOC fakta/SOP baru permanen`,
         ].join('\n'),
       );
@@ -227,13 +227,13 @@ export class TelegramNocBot {
 
     let prompt = rawText;
     if (/^\/(status|rekap)\b/i.test(rawText)) {
-      prompt = 'SPV NOC, berikan laporan ringkas kondisi semua router live sekarang termasuk CPU, PPPoE, Hotspot, DHCP, link penting, dan Ping.';
+      prompt = 'SPV NOC, berikan laporan ringkas yang rapi untuk semua router live sekarang beserta analisa pola bandwidth, redaman SFP semua CRS, dan kesimpulan SPV AI.';
     } else if (/^\/sfp\b/i.test(rawText)) {
-      prompt = 'Cek redaman optik modul SFP (RX/TX dBm dan suhu) di semua router sekarang.';
+      prompt = 'Cek redaman optik modul SFP (RX/TX dBm dan suhu) di semua CRS Backbone dan router sekarang.';
     } else if (/^\/backup_rsc\b/i.test(rawText)) {
       prompt = '/backup_rsc';
     } else if (/^\/links?\b/i.test(rawText)) {
-      prompt = 'Cek status seluruh link backbone CRS-BB01..03, suplai ethernet/SFP, serta trafik & ping internet melalui vlan2000-CMK di CORE MONGKONAI sekarang.';
+      prompt = 'Cek status seluruh link backbone di semua CRS, redaman SFP, serta jalur VLAN utama dan hasil ping internet sekarang.';
     } else if (/^\/topologi\b/i.test(rawText)) {
       prompt = 'Laporkan peta topologi kabel fiber yang sudah terhubung beserta status dan trafik live tiap jalurnya.';
     } else if (/^\/ping\b/i.test(rawText)) {

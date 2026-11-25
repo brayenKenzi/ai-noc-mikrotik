@@ -510,6 +510,8 @@ export function buildDeterministicLiveReply(
  * Centralized 1-AI Supervisor ("SPV NOC") with full real-time visibility across ALL MikroTik routers,
  * all NOC agent reports, Hotspot/PPPoE/DHCP stats, Ping metrics, and pending approvals.
  */
+import type { FleetPatternSnapshot } from './spvReportComposer.js';
+
 export interface SpvMemoryRetrieval {
   readonly relevantFacts: readonly AiLearnedFact[];
   readonly relevantTurns: readonly StoredMemoryTurn[];
@@ -523,6 +525,7 @@ export async function generateSpvFleetAnswer(options: {
   readonly pendingApprovals: readonly ApprovalTicket[];
   readonly topologyLinks?: readonly LiveTopologyLink[];
   readonly memoryContext?: SpvMemoryRetrieval;
+  readonly patternContext?: FleetPatternSnapshot;
   readonly question: string;
   readonly focusRouterId?: string;
 }): Promise<{ readonly reply: string; readonly source: string }> {
@@ -533,6 +536,7 @@ export async function generateSpvFleetAnswer(options: {
     pendingApprovals,
     topologyLinks = [],
     memoryContext,
+    patternContext,
     question,
     focusRouterId,
   } = options;
@@ -557,6 +561,7 @@ export async function generateSpvFleetAnswer(options: {
       fiberTopologyCableCount: topologyLinks.length,
     },
     externalInternetPings: externalPings,
+    bandwidthUsagePatterns: patternContext ?? null,
     fiberTopologyMap: topologyLinks.map((l) => ({
       route: `${l.fromRouterName} (${l.fromInterface || 'port'}) -> ${l.toRouterName} (${l.toInterface || 'port'})`,
       label: l.label,
@@ -647,10 +652,11 @@ export async function generateSpvFleetAnswer(options: {
     `2. Bedakan jelas antara PPPoE Aktif, Mass-Disconnect PPPoE (OLT/FO putus), Hotspot Aktif, Host Hotspot, DHCP Lease, dan Gagal Login Hotspot.`,
     `3. Gunakan fiberTopologyMap untuk menjelaskan rute kabel FO antar perangkat (dari port mana ke router mana & status live Mbps-nya).`,
     `4. Gunakan longTermMemory (learnedFactsFromAdmin dan relevantPastChats) agar kamu mengingat semua pelajaran, SOP, dan diskusi lama dengan admin. Jika justTaughtNewFact terisi, konfirmasi bahwa ilmu/info baru itu sudah tersimpan permanen di memori SPV NOC.`,
-    `5. Jika ditanya ping/latensi, tampilkan ping tiap router LIVE + ping interface khusus (seperti vlan2000-CMK ke 1.1.1.1 di CORE MONGKONAI) + ping internet (1.1.1.1 & 8.8.8.8).`,
-    `6. Perhatikan dutyRole, watchedLinks, dan customPromptSop dari setiap agen.`,
-    `7. JANGAN PERNAH mengarang angka di luar JSON.`,
-    `8. FORMAT WAJIB TANPA MARKDOWN: DILARANG KERAS memakai tanda bintang (* atau **), pagar (#), atau backtick (\`). Gunakan HURUF KAPITAL untuk judul/penekanan penting dan simbol • untuk poin agar mudah dibaca di Web dan Telegram.`,
+    `5. Gunakan bandwidthUsagePatterns untuk memahami pola pemakaian bandwidth per jam (bedakan jelas antara penurunan trafik wajar saat jam istirahat malam dengan gangguan nyata).`,
+    `6. Selalu sebutkan NAMA ROUTER dan NAMA AGEN penjaga terbarunya persis sesuai field routerName dan agentOperator di JSON.`,
+    `7. Susun jawaban secara SANGAT RAPI, terstruktur per bagian dengan garis pemisah bersih bila perlu, enak dilihat di layar HP, dan tutup laporan dengan bagian KESIMPULAN ANALISA SPV AI.`,
+    `8. JANGAN PERNAH mengarang angka di luar JSON.`,
+    `9. FORMAT WAJIB TANPA MARKDOWN: DILARANG KERAS memakai tanda bintang (* atau **), pagar (#), atau backtick (\`). Gunakan HURUF KAPITAL untuk judul bagian dan simbol • untuk poin.`,
   ].join('\n');
 
   const geminiKey = process.env.GEMINI_API_KEY?.trim();
@@ -935,50 +941,41 @@ export function buildSpvWhatsappSummary(
   const onlineLive = scope.filter((a) => a.telemetry?.reachable).length;
   const totalPppoe = scope.reduce((acc, a) => acc + (a.telemetry?.activePppoeCount ?? 0), 0);
   const totalHotspot = scope.reduce((acc, a) => acc + (a.telemetry?.activeHotspotCount ?? 0), 0);
-  const totalRadius = scope.reduce((acc, a) => acc + a.radiusTimeoutCount, 0);
-  const totalHsFail = scope.reduce((acc, a) => acc + a.hotspotFailedLoginCount, 0);
   const criticalReports = reports.filter((r) => r.severity === 'critical').slice(0, 3);
 
-  const header = isDailyReport
-    ? `👑 LAPORAN HARIAN SPV NOC — CAFE DATACENTER`
-    : `👑 LAPORAN RINGKAS SPV NOC — CAFE DATACENTER`;
+  const header = isDailyReport ? `LAPORAN HARIAN SPV NOC` : `LAPORAN RINGKAS SPV NOC`;
+  const extLine =
+    externalPings.map((ep) => `${ep.target} (${ep.avgMs !== null ? `${ep.avgMs} ms` : 'RTO'})`).join(' · ') || '-';
 
   const lines = [
     header,
-    `STATUS ROUTER LIVE: ${onlineLive}/${scope.length} ONLINE · TOTAL PELANGGAN: ${totalPppoe} PPPOE, ${totalHotspot} HOTSPOT`,
+    `${new Date().toLocaleString('id-ID')}`,
+    `━━━━━━━━━━━━━━━━━━━━━━━━`,
     ``,
-    `PERANGKAT LIVE:`,
+    `RINGKASAN JARINGAN`,
+    `• Perangkat Aktif : ${onlineLive}/${scope.length} Router Online`,
+    `• Pelanggan Aktif : ${totalPppoe} PPPoE · ${totalHotspot} Hotspot`,
+    `• Ping Internet   : ${extLine}`,
+    ``,
+    `STATUS ROUTER & AGEN PENJAGA`,
     ...scope.map((a) => {
       const t = a.telemetry;
-      const ping = t?.ping
-        ? t.ping.avgMs !== null
-          ? `${t.ping.avgMs} ms (loss ${t.ping.packetLossPercent}%)`
-          : 'RTO'
-        : '-';
-      const ifPingPart = t?.interfacePingResult
-        ? ` | ${t.interfacePingResult.label}: ${t.interfacePingResult.avgMs !== null ? `${t.interfacePingResult.avgMs}ms` : 'RTO'}`
-        : '';
-      return `• ${a.routerConfig.name}: CPU ${t?.cpuLoadPercent ?? 0}% | PPPOE ${t?.activePppoeCount ?? 0} | HS ${t?.activeHotspotCount ?? 0} | PING ${ping}${ifPingPart}`;
+      if (!t?.reachable) {
+        return `• ${a.routerConfig.name} (${a.nama})\n  STATUS: OFFLINE`;
+      }
+      const ping = t.ping ? (t.ping.avgMs !== null ? `${t.ping.avgMs} ms` : 'RTO') : '-';
+      const sfpWarn = (t.sfpOptics ?? []).filter((s) => s.health === 'warning' || s.health === 'critical');
+      const sfpNote =
+        sfpWarn.length > 0
+          ? ` · SFP Rawan: ${sfpWarn.map((s) => `${s.name} ${s.rxPowerDbm ?? 'LOS'} dBm`).join(', ')}`
+          : '';
+      return `• ${a.routerConfig.name} (${a.nama})\n  CPU ${t.cpuLoadPercent}% · ${t.activePppoeCount} PPPoE · ${t.activeHotspotCount} HS · Ping ${ping}${sfpNote}`;
     }),
     ``,
-    `PING INTERNET:`,
-    ...externalPings.map(
-      (ep) =>
-        `• ${ep.label} (${ep.target}): ${ep.avgMs !== null ? `${ep.avgMs} ms (max ${ep.maxMs} ms)` : 'RTO'} · LOSS ${ep.packetLossPercent}% [${ep.status.toUpperCase()}]`,
-    ),
-    ``,
-    `CATATAN RELEVAN:`,
-    totalRadius === 0 && totalHsFail === 0 && criticalReports.length === 0
-      ? `• Semua jaringan stabil, 0 RADIUS timeout, 0 anomali kritis.`
-      : [
-          totalRadius > 0 ? `• RADIUS Timeout terdeteksi: ${totalRadius}x` : '',
-          totalHsFail > 0 ? `• Gagal login Hotspot di log: ${totalHsFail}x` : '',
-          ...criticalReports.map((r) => `• [${r.category.toUpperCase()}] ${r.routerName}: ${r.message}`),
-        ]
-          .filter(Boolean)
-          .join('\n'),
-    ``,
-    `Waktu: ${new Date().toLocaleString('id-ID')}`,
+    `KESIMPULAN ANALISA SPV AI`,
+    criticalReports.length === 0
+      ? `Seluruh jaringan terpantau stabil dengan ${totalPppoe} sesi PPPoE dan ${totalHotspot} user Hotspot aktif.`
+      : `Terdapat ${criticalReports.length} catatan insiden terakhir (${criticalReports.map((r) => `${r.routerName}: ${r.message}`).join('; ')}).`,
   ];
   return sanitizePlainAiText(lines.join('\n'));
 }

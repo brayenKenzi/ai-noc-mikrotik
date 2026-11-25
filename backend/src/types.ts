@@ -171,6 +171,7 @@ export interface NewRouterInput {
 
 export interface InterfaceMetric {
   readonly name: string;
+  readonly defaultName?: string;
   readonly running: boolean;
   readonly disabled: boolean;
   readonly rxMbps: number;

@@ -18,6 +18,7 @@ import { FonnteWhatsappNotifier } from './fonnteNotifier.js';
 import { TopologyStore } from './topologyStore.js';
 import { AiMemoryStore } from './aiMemoryStore.js';
 import { RscBackupManager } from './rscBackupManager.js';
+import { TrafficPatternLearner } from './trafficPatternLearner.js';
 import { SyslogUdpServer, parseMikrotikSyslog } from './syslogReceiver.js';
 import type { NocSnapshot } from './types.js';
 
@@ -258,6 +259,9 @@ export async function createNocServer() {
   const aiMemoryStore = new AiMemoryStore(dataDir);
   await aiMemoryStore.init();
 
+  const trafficPatternLearner = new TrafficPatternLearner(dataDir);
+  await trafficPatternLearner.init();
+
   const rscRootDir = process.env.NOC_RSC_DIR ?? path.resolve(dataDir, '../mikrotik-rsc');
   const rscBackupManager = new RscBackupManager({
     rscRootDir,
@@ -307,6 +311,7 @@ export async function createNocServer() {
     topologyStore,
     aiMemoryStore,
     rscBackupManager,
+    trafficPatternLearner,
     externalPingTargets,
   });
 

@@ -38,6 +38,7 @@ export function encodeSentence(words: readonly string[]): Buffer {
 export function decodeWordsFromBuffer(buf: Buffer): { sentences: string[][]; remaining: Buffer } {
   const sentences: string[][] = [];
   let offset = 0;
+  let sentenceStartOffset = 0;
   let currentSentence: string[] = [];
 
   while (offset < buf.length) {
@@ -74,6 +75,7 @@ export function decodeWordsFromBuffer(buf: Buffer): { sentences: string[][]; rem
         sentences.push(currentSentence);
         currentSentence = [];
       }
+      sentenceStartOffset = offset;
       continue;
     }
 
@@ -88,7 +90,7 @@ export function decodeWordsFromBuffer(buf: Buffer): { sentences: string[][]; rem
 
   return {
     sentences,
-    remaining: buf.subarray(offset),
+    remaining: buf.subarray(sentenceStartOffset),
   };
 }
 

@@ -32,6 +32,13 @@ import {
   searchCustomersAcrossFleet,
 } from './customerLookup.js';
 import type { RscBackupManager } from './rscBackupManager.js';
+import type { TrafficPatternLearner } from './trafficPatternLearner.js';
+import {
+  composeSpvExecutiveReport,
+  composeSpvRecoveryReport,
+  composeSpvVerifiedIncidentReport,
+  type VerifiedIncidentItem,
+} from './spvReportComposer.js';
 import type { NewTopologyLinkInput, TopologyStore } from './topologyStore.js';
 import type { AiMemoryStore } from './aiMemoryStore.js';
 import type {
@@ -130,6 +137,14 @@ export class NocOrchestrator {
   private readonly topologyStore?: TopologyStore;
   private readonly aiMemoryStore?: AiMemoryStore;
   private readonly rscBackupManager?: RscBackupManager;
+  private readonly trafficPatternLearner?: TrafficPatternLearner;
+  private readonly pendingIncidentsMap = new Map<string, VerifiedIncidentItem>();
+  private readonly pendingRecoveriesMap = new Map<
+    string,
+    { readonly key: string; readonly routerId: string; readonly routerName: string; readonly agentName: string; readonly detail: string }
+  >();
+  private incidentBatchTimer: NodeJS.Timeout | null = null;
+  private recoveryBatchTimer: NodeJS.Timeout | null = null;
   private readonly externalPingTargets: readonly string[];
   private readonly nocServerIp: string;
   private readonly onBroadcast: (snapshot: NocSnapshot) => void;
@@ -157,6 +172,7 @@ export class NocOrchestrator {
     readonly topologyStore?: TopologyStore;
     readonly aiMemoryStore?: AiMemoryStore;
     readonly rscBackupManager?: RscBackupManager;
+    readonly trafficPatternLearner?: TrafficPatternLearner;
     readonly externalPingTargets?: readonly string[];
   }) {
     this.routers = options.routers;
@@ -170,6 +186,7 @@ export class NocOrchestrator {
     this.topologyStore = options.topologyStore;
     this.aiMemoryStore = options.aiMemoryStore;
     this.rscBackupManager = options.rscBackupManager;
+    this.trafficPatternLearner = options.trafficPatternLearner;
     this.externalPingTargets =
       options.externalPingTargets && options.externalPingTargets.length > 0
         ? options.externalPingTargets
@@ -306,6 +323,7 @@ export class NocOrchestrator {
     const snapshot = this.buildSnapshot();
     const pending = this.approvalStore.getAll().filter((a) => a.status === 'PENDING');
     const memoryContext = this.aiMemoryStore?.retrieveRelevantContext(question);
+    const patternContext = this.trafficPatternLearner?.buildFleetPatternContext(snapshot.agents);
     const result = await generateSpvFleetAnswer({
       agents: snapshot.agents,
       externalPings: this.externalPings,
@@ -313,6 +331,7 @@ export class NocOrchestrator {
       pendingApprovals: pending,
       topologyLinks: snapshot.topologyLinks,
       memoryContext,
+      patternContext,
       question,
       focusRouterId,
     });
@@ -373,7 +392,15 @@ export class NocOrchestrator {
       return { ok: false, detail: 'Notifier WhatsApp belum diaktifkan' };
     }
     const snapshot = this.buildSnapshot();
-    const summaryText = buildSpvWhatsappSummary(snapshot.agents, this.externalPings, this.spvReports);
+    const patternContext = this.trafficPatternLearner?.buildFleetPatternContext(snapshot.agents);
+    const summaryText = await composeSpvExecutiveReport({
+      agents: snapshot.agents,
+      externalPings: this.externalPings,
+      reports: this.spvReports,
+      isDailyReport: false,
+      patternContext,
+      useAiConclusion: true,
+    });
     const target = (targetOverride ?? this.fonnteNotifier.getSettings().waTarget).trim();
     const res = await this.fonnteNotifier.sendRaw(target, summaryText);
     if (res.ok) {
@@ -383,7 +410,7 @@ export class NocOrchestrator {
         agentName: 'SPV NOC',
         severity: 'info',
         category: 'recovery',
-        message: 'Rekap ringkas seluruh jaringan dikirim ke WhatsApp Boss via Fonnte.',
+        message: 'Laporan ringkas rapi beserta kesimpulan SPV AI dikirim ke WhatsApp.',
         sentToWa: true,
       });
       this.broadcast();
@@ -672,6 +699,15 @@ export class NocOrchestrator {
       clearTimeout(this.rscInitTimer);
       this.rscInitTimer = null;
     }
+    if (this.incidentBatchTimer) {
+      clearTimeout(this.incidentBatchTimer);
+      this.incidentBatchTimer = null;
+    }
+    if (this.recoveryBatchTimer) {
+      clearTimeout(this.recoveryBatchTimer);
+      this.recoveryBatchTimer = null;
+    }
+    void this.trafficPatternLearner?.flush();
     sharedRouterOsPool.closeAll();
     this.telegramBot.stop();
   }
@@ -701,7 +737,15 @@ export class NocOrchestrator {
       return false;
     }
     const snapshot = this.buildSnapshot();
-    const reportText = buildSpvWhatsappSummary(snapshot.agents, this.externalPings, this.spvReports, true);
+    const patternContext = this.trafficPatternLearner?.buildFleetPatternContext(snapshot.agents, now);
+    const reportText = await composeSpvExecutiveReport({
+      agents: snapshot.agents,
+      externalPings: this.externalPings,
+      reports: this.spvReports,
+      isDailyReport: true,
+      patternContext,
+      useAiConclusion: true,
+    });
     const target = this.fonnteNotifier.getSettings().waTarget.trim();
     const res = await this.fonnteNotifier.sendRaw(target, reportText);
     if (res.ok) {
@@ -713,13 +757,173 @@ export class NocOrchestrator {
         agentName: 'SPV NOC',
         severity: 'info',
         category: 'recovery',
-        message: 'Laporan harian 1x/hari terkirim ke WhatsApp & Telegram.',
+        message: 'Laporan harian rapi + analisa pola bandwidth SPV AI terkirim ke WhatsApp & Telegram.',
         sentToWa: true,
       });
       this.broadcast();
       return true;
     }
     return false;
+  }
+
+  /**
+   * Active pre-send verification & 45-second consolidation bundler:
+   * - Re-tests live router/ping before escalating so transient 2-3s glitches NEVER trigger WA.
+   * - Bundles simultaneous upstream/downstream events into ONE neat report concluded by SPV AI!
+   */
+  private async verifyAndQueueIncident(
+    router: RouterDevice,
+    candidate: Omit<VerifiedIncidentItem, 'verificationNote' | 'detectedAt'> & {
+      readonly checkInterfaceDown?: string;
+      readonly isTrafficDropOnly?: boolean;
+    },
+  ): Promise<void> {
+    if (!this.fonnteNotifier) return;
+    if (!this.fonnteNotifier.canDispatchIncidentKey(candidate.key)) {
+      this.fonnteNotifier.markIncidentActive(candidate.key);
+      return;
+    }
+    if (this.pendingIncidentsMap.has(candidate.key)) {
+      return;
+    }
+
+    // Active Verification Re-Test (wait 2s, then run live ping + API re-check!)
+    await new Promise((r) => setTimeout(r, 2000));
+    const pingTest = await runSinglePing(router.host, router.name, this.getPingThresholds(false));
+
+    // If this was only a traffic-drop candidate (link still UP), NEVER alert WA unless active ping ALSO degraded!
+    if (candidate.isTrafficDropOnly) {
+      if (pingTest.status === 'ok' || pingTest.status === 'high') {
+        return;
+      }
+    }
+
+    let verificationNote =
+      pingTest.avgMs !== null
+        ? `Tes ulang Ping ${router.host}: ${pingTest.avgMs} ms (loss ${pingTest.packetLossPercent}%)`
+        : `Tes ulang Ping ${router.host}: RTO 100% tidak merespons`;
+
+    if (candidate.category === 'offline' || candidate.checkInterfaceDown) {
+      const reTel = await pollRouterTelemetry(router, true, this.resolveReadSecret(router));
+      if (candidate.category === 'offline' && reTel.reachable) {
+        // Recovered on active re-test -> cancel false alarm!
+        return;
+      }
+      if (candidate.checkInterfaceDown && reTel.reachable) {
+        const targetIf = reTel.interfaces.find(
+          (i) => i.name.toLowerCase() === candidate.checkInterfaceDown!.toLowerCase(),
+        );
+        if (targetIf?.running) {
+          // Link came back UP on active re-test -> cancel false alarm!
+          return;
+        }
+        verificationNote = `Tes ulang API memastikan port ${candidate.checkInterfaceDown} masih DOWN`;
+      }
+    }
+
+    const verifiedItem: VerifiedIncidentItem = {
+      key: candidate.key,
+      category: candidate.category,
+      routerId: router.id,
+      routerName: router.name,
+      agentName: router.agentName,
+      headline: candidate.headline,
+      verificationNote,
+      detectedAt: new Date().toISOString(),
+    };
+
+    this.pendingIncidentsMap.set(candidate.key, verifiedItem);
+    if (!this.incidentBatchTimer) {
+      // Consolidate correlated events for 35s so 1 upstream cut + 3 downstream alerts merge into 1 neat SPV AI report!
+      this.incidentBatchTimer = setTimeout(() => {
+        this.incidentBatchTimer = null;
+        void this.flushIncidentBatch();
+      }, 35_000);
+    }
+  }
+
+  private async flushIncidentBatch(): Promise<void> {
+    if (!this.fonnteNotifier || this.pendingIncidentsMap.size === 0) return;
+    const batch = Array.from(this.pendingIncidentsMap.values());
+    this.pendingIncidentsMap.clear();
+
+    const snapshot = this.buildSnapshot();
+    const patternContext = this.trafficPatternLearner?.buildFleetPatternContext(snapshot.agents);
+    const reportText = await composeSpvVerifiedIncidentReport({
+      incidents: batch,
+      agents: snapshot.agents,
+      topologyLinks: snapshot.topologyLinks,
+      patternContext,
+    });
+
+    const keys = batch.map((b) => b.key);
+    const sent = await this.fonnteNotifier.sendBundledAlerts(keys, reportText);
+    if (sent) {
+      void this.telegramBot.sendPlainAlert(reportText);
+    }
+    for (const b of batch) {
+      this.recordSpvReport({
+        routerId: b.routerId,
+        routerName: b.routerName,
+        agentName: b.agentName,
+        severity: 'critical',
+        category: b.category,
+        message: `${b.headline} (${b.verificationNote})`,
+        sentToWa: sent,
+      });
+    }
+    this.broadcast();
+  }
+
+  private queueRecoveryNotification(item: {
+    readonly key: string;
+    readonly routerId: string;
+    readonly routerName: string;
+    readonly agentName: string;
+    readonly detail: string;
+  }): void {
+    if (!this.fonnteNotifier?.hasActiveIncident(item.key)) return;
+    this.pendingRecoveriesMap.set(item.key, item);
+    if (!this.recoveryBatchTimer) {
+      this.recoveryBatchTimer = setTimeout(() => {
+        this.recoveryBatchTimer = null;
+        void this.flushRecoveryBatch();
+      }, 20_000);
+    }
+  }
+
+  private async flushRecoveryBatch(): Promise<void> {
+    if (!this.fonnteNotifier || this.pendingRecoveriesMap.size === 0) return;
+    const items = Array.from(this.pendingRecoveriesMap.values());
+    this.pendingRecoveriesMap.clear();
+
+    const activeKeys = this.fonnteNotifier.consumeActiveRecoveryKeys(items.map((i) => i.key));
+    if (activeKeys.length === 0) return;
+    const activeSet = new Set(activeKeys);
+    const confirmedItems = items.filter((i) => activeSet.has(i.key));
+    if (confirmedItems.length === 0) return;
+
+    const msg = composeSpvRecoveryReport(confirmedItems);
+    let sentWa = false;
+    if (this.fonnteNotifier.getSettings().waEnabled && this.fonnteNotifier.isConfigured) {
+      const res = await this.fonnteNotifier.sendRaw(this.fonnteNotifier.getSettings().waTarget, msg);
+      sentWa = res.ok;
+    }
+    if (sentWa) {
+      void this.telegramBot.sendPlainAlert(msg);
+    }
+    for (const it of confirmedItems) {
+      this.recordSpvReport({
+        routerId: it.routerId,
+        routerName: it.routerName,
+        agentName: it.agentName,
+        severity: 'info',
+        category: 'recovery',
+        message: it.detail,
+        sentToWa: sentWa,
+      });
+    }
+    this.broadcast();
   }
 
   async runPingSweep(): Promise<void> {
@@ -837,22 +1041,28 @@ export class NocOrchestrator {
         return false;
       }
 
-      const badge =
+      const title =
         metric.status === 'down'
-          ? '🚨 DARURAT SPV NOC — PING RTO / PUTUS'
-          : '🚨 KRITIS SPV NOC — PING SANGAT TINGGI / LOSS';
-      const rttLine =
+          ? 'LAPORAN PING TERPUTUS (RTO) — SPV NOC'
+          : 'LAPORAN LATENSI KRITIS — SPV NOC';
+      const rttDetail =
         metric.avgMs !== null
-          ? `LATENSI: avg ${metric.avgMs} ms (min ${metric.minMs} / max ${metric.maxMs} ms)`
-          : `LATENSI: RTO / TIDAK MERESPONS`;
+          ? `Rata-rata ${metric.avgMs} ms (maks ${metric.maxMs} ms) · Loss ${metric.packetLossPercent}%`
+          : `RTO 100% tidak merespons`;
       const msg = [
-        badge,
-        `DILAPORKAN OLEH: ${agentName}`,
-        `TARGET: ${routerName} (${metric.target})`,
-        rttLine,
-        `PACKET LOSS: ${metric.packetLossPercent}%`,
-        `KONFIRMASI: ${streak}x berturut-turut (ambang kritis ≥ ${thresholds.critMs} ms / loss ≥ ${thresholds.lossCritPct}%)`,
-        `Waktu: ${new Date().toLocaleString('id-ID')}`,
+        title,
+        `${new Date().toLocaleString('id-ID')}`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━`,
+        ``,
+        `TEMUAN SENSOR PING (${streak}X CEK BERTURUT-TURUT)`,
+        `• Perangkat : ${routerName} (${metric.target})`,
+        `• Penjaga   : ${agentName}`,
+        `• Hasil Tes : ${rttDetail}`,
+        ``,
+        `KESIMPULAN ANALISA SPV AI`,
+        metric.status === 'down'
+          ? `Target ${routerName} tidak merespons dalam ${streak} pengujian berturut-turut. Periksa jalur transmisi atau perangkat hulu.`
+          : `Latensi atau packet loss pada ${routerName} melampaui batas kritis (≥ ${thresholds.critMs} ms / loss ≥ ${thresholds.lossCritPct}%) secara konsisten.`,
       ].join('\n');
       const sent = await this.fonnteNotifier.sendAlertWithCooldown(incidentKey, msg);
       if (sent) {
@@ -884,12 +1094,13 @@ export class NocOrchestrator {
       }
       this.pingOkStreakMap.set(incidentKey, 0);
 
-      const recoveryMsg = [
-        `✅ PULIH SPV NOC — PING KEMBALI NORMAL`,
-        `TARGET: ${routerName} (${metric.target})`,
-        `LATENSI SEKARANG: ${metric.avgMs ?? 0} ms · LOSS ${metric.packetLossPercent}%`,
-        `Waktu: ${new Date().toLocaleString('id-ID')}`,
-      ].join('\n');
+      const recoveryMsg = composeSpvRecoveryReport([
+        {
+          routerName,
+          agentName,
+          detail: `Ping kembali stabil (${metric.avgMs ?? 0} ms · loss ${metric.packetLossPercent}%)`,
+        },
+      ]);
       const sentRec = await this.fonnteNotifier.sendRecoveryIfActive(incidentKey, recoveryMsg);
       if (sentRec) {
         void this.telegramBot.sendPlainAlert(recoveryMsg);
@@ -924,51 +1135,32 @@ export class NocOrchestrator {
         }
         const router = this.routers.find((r) => r.id === tel.routerId);
         if (router && !router.simulated && this.fonnteNotifier) {
-          const confirmNeeded = Math.max(2, this.fonnteNotifier.getSettings().pingConfirmCount ?? 3);
+          const confirmNeeded = Math.max(3, this.fonnteNotifier.getSettings().pingConfirmCount ?? 3);
           if (tel.status === 'offline') {
             this.resourceCritStreakMap.set(router.id, 0);
             const offStreak = (this.offlineStreakMap.get(router.id) ?? 0) + 1;
             this.offlineStreakMap.set(router.id, offStreak);
             if (offStreak >= confirmNeeded) {
-              const offlineMsg = [
-                `🚨 DARURAT SPV NOC — ROUTER OFFLINE`,
-                `DILAPORKAN OLEH: ${router.agentName}`,
-                `PERANGKAT: ${router.name} (${router.host}:${router.port})`,
-                `DETAIL: ${tel.lastError ?? 'Router tidak terjangkau via API'} (${offStreak}x cek berturut-turut)`,
-                `Waktu: ${new Date().toLocaleString('id-ID')}`,
-              ].join('\n');
-              const sent = await this.fonnteNotifier.sendAlertWithCooldown(`offline:${router.id}`, offlineMsg);
-              if (sent) {
-                void this.telegramBot.sendPlainAlert(offlineMsg);
-                this.recordSpvReport({
-                  routerId: router.id,
-                  routerName: router.name,
-                  agentName: router.agentName,
-                  severity: 'critical',
-                  category: 'offline',
-                  message: `Router OFFLINE terkonfirmasi (${tel.lastError ?? 'API unreachable'})`,
-                  sentToWa: true,
-                });
-              }
-            }
-          } else {
-            this.offlineStreakMap.set(router.id, 0);
-            const recMsg = `✅ PULIH SPV NOC — ROUTER ONLINE KEMBALI\nPERANGKAT: ${router.name} (${router.host}) kembali normal · CPU ${tel.cpuLoadPercent}% · Uptime ${tel.uptime}`;
-            const sentRec = await this.fonnteNotifier.sendRecoveryIfActive(`offline:${router.id}`, recMsg);
-            if (sentRec) {
-              void this.telegramBot.sendPlainAlert(recMsg);
-              this.recordSpvReport({
+              void this.verifyAndQueueIncident(router, {
+                key: `offline:${router.id}`,
+                category: 'offline',
                 routerId: router.id,
                 routerName: router.name,
                 agentName: router.agentName,
-                severity: 'info',
-                category: 'recovery',
-                message: `Router kembali ONLINE (CPU ${tel.cpuLoadPercent}%, uptime ${tel.uptime})`,
-                sentToWa: true,
+                headline: `Router tidak terjangkau via API (${tel.lastError ?? 'Connection timeout'})`,
               });
             }
+          } else {
+            this.offlineStreakMap.set(router.id, 0);
+            this.queueRecoveryNotification({
+              key: `offline:${router.id}`,
+              routerId: router.id,
+              routerName: router.name,
+              agentName: router.agentName,
+              detail: `Router kembali ONLINE (CPU ${tel.cpuLoadPercent}% · Uptime ${tel.uptime})`,
+            });
 
-            // Only alert WA on SUSTAINED extreme hardware overload (not 1-tick CPU spikes!)
+            // Only alert WA on SUSTAINED extreme hardware overload
             const extremeHw =
               tel.cpuLoadPercent >= 95 ||
               tel.memoryUsedPercent >= 95 ||
@@ -976,97 +1168,58 @@ export class NocOrchestrator {
             if (extremeHw) {
               const hwStreak = (this.resourceCritStreakMap.get(router.id) ?? 0) + 1;
               this.resourceCritStreakMap.set(router.id, hwStreak);
-              const requiredHwStreak = tel.temperatureC !== null && tel.temperatureC >= 78 ? 3 : 5;
+              const requiredHwStreak = tel.temperatureC !== null && tel.temperatureC >= 78 ? 4 : 6;
               if (hwStreak >= requiredHwStreak) {
-                const critMsg = [
-                  `🔥 KRITIS SPV NOC — OVERLOAD HARDWARE BERKELANJUTAN`,
-                  `DILAPORKAN OLEH: ${router.agentName}`,
-                  `PERANGKAT: ${router.name} (${tel.boardName})`,
-                  `CPU: ${tel.cpuLoadPercent}% · RAM: ${tel.memoryUsedPercent}%${tel.temperatureC !== null ? ` · SUHU: ${tel.temperatureC}°C` : ''}`,
-                  `KONFIRMASI: Bertahan tinggi ${hwStreak}x pengecekan berturut-turut`,
-                  `Waktu: ${new Date().toLocaleString('id-ID')}`,
-                ].join('\n');
-                const sentCrit = await this.fonnteNotifier.sendAlertWithCooldown(`critical:${router.id}`, critMsg);
-                if (sentCrit) {
-                  void this.telegramBot.sendPlainAlert(critMsg);
-                  this.recordSpvReport({
-                    routerId: router.id,
-                    routerName: router.name,
-                    agentName: router.agentName,
-                    severity: 'critical',
-                    category: 'resource',
-                    message: `Overload berkelanjutan: CPU ${tel.cpuLoadPercent}% · RAM ${tel.memoryUsedPercent}%${tel.temperatureC !== null ? ` · Suhu ${tel.temperatureC}°C` : ''}`,
-                    sentToWa: true,
-                  });
-                }
+                void this.verifyAndQueueIncident(router, {
+                  key: `critical:${router.id}`,
+                  category: 'resource',
+                  routerId: router.id,
+                  routerName: router.name,
+                  agentName: router.agentName,
+                  headline: `Beban hardware sangat tinggi (CPU ${tel.cpuLoadPercent}% · RAM ${tel.memoryUsedPercent}%${tel.temperatureC !== null ? ` · Suhu ${tel.temperatureC}°C` : ''})`,
+                });
               }
             } else {
               this.resourceCritStreakMap.set(router.id, 0);
             }
 
-            // Evaluate Role-Specific Watched Links & Traffic Drop Watchdog (CRS Backbone & CORE MONGKONAI vlan2000-CMK!)
+            // Evaluate Role-Specific Watched Links with 24h Bandwidth Pattern Learner!
             const { statuses: watchedStatuses, events: linkEvents } = this.linkWatchdog.evaluateRouterInterfaces(
               router,
               tel.interfaces,
               confirmNeeded,
+              (ifName, mbps) => this.trafficPatternLearner?.isNormalBandwidthPattern(router.id, ifName, mbps) ?? false,
             );
-            const duty = resolveRouterDutyProfile(router);
             for (const ev of linkEvents) {
-              const impactNote =
-                duty.dutyRole === 'core_vlan_watchdog' && ev.interfaceName.toLowerCase().includes('vlan2000')
-                  ? 'DAMPAK: Jalur utama penyuplai CCR Mongkonai terganggu!'
-                  : duty.dutyRole === 'backbone_master'
-                    ? 'DAMPAK: Jalur suplai Master Backbone CRS-BB01 ke distribusi terdampak!'
-                    : '';
-
-              if (ev.kind === 'down' || ev.kind === 'drop') {
-                const badge =
-                  ev.kind === 'down'
-                    ? `🚨 KRITIS SPV NOC — LINK ${ev.interfaceName} DOWN`
-                    : `⚠️ KRITIS SPV NOC — TRAFIK ${ev.interfaceName} DROP DRASTIS`;
-                const linkMsg = [
-                  badge,
-                  `DILAPORKAN OLEH: ${router.agentName} (${duty.dutyLabel})`,
-                  `ROUTER: ${router.name} (${router.host})`,
-                  `DETAIL: ${ev.message}`,
-                  impactNote,
-                  `Waktu: ${new Date().toLocaleString('id-ID')}`,
-                ]
-                  .filter(Boolean)
-                  .join('\n');
-                const sentLink = await this.fonnteNotifier.sendAlertWithCooldown(ev.key, linkMsg);
-                if (sentLink) {
-                  void this.telegramBot.sendPlainAlert(linkMsg);
-                  this.recordSpvReport({
-                    routerId: router.id,
-                    routerName: router.name,
-                    agentName: router.agentName,
-                    severity: 'critical',
-                    category: 'link',
-                    message: `${ev.message}${impactNote ? ` · ${impactNote}` : ''}`,
-                    sentToWa: true,
-                  });
-                }
+              if (ev.kind === 'down') {
+                void this.verifyAndQueueIncident(router, {
+                  key: ev.key,
+                  category: 'link',
+                  routerId: router.id,
+                  routerName: router.name,
+                  agentName: router.agentName,
+                  headline: ev.message,
+                  checkInterfaceDown: ev.interfaceName,
+                });
+              } else if (ev.kind === 'drop') {
+                // Traffic drop while link is UP: ONLY escalate if active ping verification ALSO proves degradation!
+                void this.verifyAndQueueIncident(router, {
+                  key: ev.key,
+                  category: 'link',
+                  routerId: router.id,
+                  routerName: router.name,
+                  agentName: router.agentName,
+                  headline: ev.message,
+                  isTrafficDropOnly: true,
+                });
               } else if (ev.kind === 'recovered') {
-                const recLinkMsg = [
-                  `✅ PULIH SPV NOC — LINK ${ev.interfaceName} NORMAL`,
-                  `ROUTER: ${router.name} (${router.host})`,
-                  `DETAIL: ${ev.message}`,
-                  `Waktu: ${new Date().toLocaleString('id-ID')}`,
-                ].join('\n');
-                const sentRecLink = await this.fonnteNotifier.sendRecoveryIfActive(ev.key, recLinkMsg);
-                if (sentRecLink) {
-                  void this.telegramBot.sendPlainAlert(recLinkMsg);
-                  this.recordSpvReport({
-                    routerId: router.id,
-                    routerName: router.name,
-                    agentName: router.agentName,
-                    severity: 'info',
-                    category: 'recovery',
-                    message: ev.message,
-                    sentToWa: true,
-                  });
-                }
+                this.queueRecoveryNotification({
+                  key: ev.key,
+                  routerId: router.id,
+                  routerName: router.name,
+                  agentName: router.agentName,
+                  detail: ev.message,
+                });
               }
             }
 
@@ -1080,50 +1233,25 @@ export class NocOrchestrator {
               minDropUsers,
             );
             if (massEvent?.kind === 'mass_disconnect') {
-              const massMsg = [
-                `🚨 DARURAT SPV NOC — MASS-DISCONNECT PPPOE (OLT / FO PUTUS!)`,
-                `DILAPORKAN OLEH: ${router.agentName}`,
-                `ROUTER: ${router.name} (${router.host})`,
-                `DETAIL: ${massEvent.message}`,
-                `SARAN SEGERA: Cek power OLT, jalur fiber PON/ODP, dan uplink menuju ${router.name}.`,
-                `Waktu: ${new Date().toLocaleString('id-ID')}`,
-              ].join('\n');
-              const sentMass = await this.fonnteNotifier.sendAlertWithCooldown(massEvent.key, massMsg);
-              if (sentMass) {
-                void this.telegramBot.sendPlainAlert(massMsg);
-                this.recordSpvReport({
-                  routerId: router.id,
-                  routerName: router.name,
-                  agentName: router.agentName,
-                  severity: 'critical',
-                  category: 'pppoe_mass',
-                  message: massEvent.message,
-                  sentToWa: true,
-                });
-              }
+              void this.verifyAndQueueIncident(router, {
+                key: massEvent.key,
+                category: 'pppoe_mass',
+                routerId: router.id,
+                routerName: router.name,
+                agentName: router.agentName,
+                headline: massEvent.message,
+              });
             } else if (massEvent?.kind === 'recovered') {
-              const recMassMsg = [
-                `✅ PULIH SPV NOC — PELANGGAN PPPOE KEMBALI ONLINE`,
-                `ROUTER: ${router.name} (${router.host})`,
-                `DETAIL: ${massEvent.message}`,
-                `Waktu: ${new Date().toLocaleString('id-ID')}`,
-              ].join('\n');
-                const sentRecMass = await this.fonnteNotifier.sendRecoveryIfActive(massEvent.key, recMassMsg);
-              if (sentRecMass) {
-                void this.telegramBot.sendPlainAlert(recMassMsg);
-                this.recordSpvReport({
-                  routerId: router.id,
-                  routerName: router.name,
-                  agentName: router.agentName,
-                  severity: 'info',
-                  category: 'recovery',
-                  message: massEvent.message,
-                  sentToWa: true,
-                });
-              }
+              this.queueRecoveryNotification({
+                key: massEvent.key,
+                routerId: router.id,
+                routerName: router.name,
+                agentName: router.agentName,
+                detail: massEvent.message,
+              });
             }
 
-            // Evaluate SFP Optical RX/TX Power Watchdog (dBm Early Warning before Fiber Cut!)
+            // Evaluate SFP Optical RX/TX Power Watchdog across ALL CRS Backbones & Routers!
             if (tel.sfpOptics && tel.sfpOptics.length > 0) {
               const sfpCritDbm = this.fonnteNotifier.getSettings().sfpRxCritDbm ?? -24;
               const { updatedOptics, events: sfpEvents } = this.sfpWatchdog.evaluate(
@@ -1136,49 +1264,22 @@ export class NocOrchestrator {
 
               for (const sev of sfpEvents) {
                 if (sev.kind === 'high_attenuation' || sev.kind === 'los') {
-                  const sfpMsg = [
-                    sev.kind === 'los'
-                      ? `🚨 KRITIS SPV NOC — MODUL SFP LOS (HILANG SINYAL OPTIK)`
-                      : `🌅 EARLY WARNING SPV NOC — REDAMAN OPTIK SFP KRITIS`,
-                    `DILAPORKAN OLEH: ${router.agentName}`,
-                    `ROUTER: ${router.name} (${router.host})`,
-                    `DETAIL: ${sev.message}`,
-                    `SARAN: Bersihkan konektor patchcord/adapter FO atau cek tekukan kabel sebelum link putus total.`,
-                    `Waktu: ${new Date().toLocaleString('id-ID')}`,
-                  ].join('\n');
-                  const sentSfp = await this.fonnteNotifier.sendAlertWithCooldown(sev.key, sfpMsg);
-                  if (sentSfp) {
-                    void this.telegramBot.sendPlainAlert(sfpMsg);
-                    this.recordSpvReport({
-                      routerId: router.id,
-                      routerName: router.name,
-                      agentName: router.agentName,
-                      severity: 'critical',
-                      category: 'sfp',
-                      message: sev.message,
-                      sentToWa: true,
-                    });
-                  }
+                  void this.verifyAndQueueIncident(router, {
+                    key: sev.key,
+                    category: 'sfp',
+                    routerId: router.id,
+                    routerName: router.name,
+                    agentName: router.agentName,
+                    headline: sev.message,
+                  });
                 } else if (sev.kind === 'recovered') {
-                  const recSfpMsg = [
-                    `✅ PULIH SPV NOC — REDAMAN OPTIK SFP NORMAL`,
-                    `ROUTER: ${router.name} (${router.host})`,
-                    `DETAIL: ${sev.message}`,
-                    `Waktu: ${new Date().toLocaleString('id-ID')}`,
-                  ].join('\n');
-                  const sentRecSfp = await this.fonnteNotifier.sendRecoveryIfActive(sev.key, recSfpMsg);
-                  if (sentRecSfp) {
-                    void this.telegramBot.sendPlainAlert(recSfpMsg);
-                    this.recordSpvReport({
-                      routerId: router.id,
-                      routerName: router.name,
-                      agentName: router.agentName,
-                      severity: 'info',
-                      category: 'recovery',
-                      message: sev.message,
-                      sentToWa: true,
-                    });
-                  }
+                  this.queueRecoveryNotification({
+                    key: sev.key,
+                    routerId: router.id,
+                    routerName: router.name,
+                    agentName: router.agentName,
+                    detail: sev.message,
+                  });
                 }
               }
             }
@@ -1190,6 +1291,7 @@ export class NocOrchestrator {
           }
         }
       }
+      await this.trafficPatternLearner?.observeFleet(currentRouters, this.telemetryMap);
       this.broadcast();
     } finally {
       this.polling = false;
@@ -1226,29 +1328,16 @@ export class NocOrchestrator {
           const nextHits = [...prevHits, ...freshRadius.map(() => nowMs)];
           this.radiusBurstMap.set(router.id, nextHits);
 
-          if (nextHits.length >= 3) {
+          if (nextHits.length >= 4) {
             const failedUser = parseRadiusTimeoutUser(freshRadius[0].message) ?? 'unknown';
-            const radiusMsg = [
-              `🚨 KRITIS SPV NOC — GANGGUAN RADIUS TIMEOUT`,
-              `DILAPORKAN OLEH: ${router.agentName}`,
-              `ROUTER: ${router.name} (${router.host})`,
-              `KEJADIAN: ${nextHits.length}x timeout dalam 2 menit terakhir (user terbaru: ${failedUser})`,
-              `LOG: ${freshRadius[0].message}`,
-              `Waktu: ${new Date().toLocaleString('id-ID')}`,
-            ].join('\n');
-            const sent = await this.fonnteNotifier.sendAlertWithCooldown(`radius:${router.id}`, radiusMsg);
-            if (sent) {
-              void this.telegramBot.sendPlainAlert(radiusMsg);
-              this.recordSpvReport({
-                routerId: router.id,
-                routerName: router.name,
-                agentName: router.agentName,
-                severity: 'critical',
-                category: 'radius',
-                message: `RADIUS Gangguan: ${nextHits.length}x timeout dalam 2 menit (user "${failedUser}")`,
-                sentToWa: true,
-              });
-            }
+            void this.verifyAndQueueIncident(router, {
+              key: `radius:${router.id}`,
+              category: 'radius',
+              routerId: router.id,
+              routerName: router.name,
+              agentName: router.agentName,
+              headline: `RADIUS Timeout beruntun (${nextHits.length}x dalam 2 menit · user contoh: "${failedUser}")`,
+            });
           }
         }
         await this.triggerAgentInvestigation(router, freshRadius.length > 0);
