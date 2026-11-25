@@ -19,6 +19,8 @@ import { TopologyStore } from './topologyStore.js';
 import { AiMemoryStore } from './aiMemoryStore.js';
 import { RscBackupManager } from './rscBackupManager.js';
 import { TrafficPatternLearner } from './trafficPatternLearner.js';
+import { NmsClient } from './nmsClient.js';
+import { NmsToolSuite } from './nmsTools.js';
 import { SyslogUdpServer, parseMikrotikSyslog } from './syslogReceiver.js';
 import type { NocSnapshot } from './types.js';
 
@@ -262,6 +264,9 @@ export async function createNocServer() {
   const trafficPatternLearner = new TrafficPatternLearner(dataDir);
   await trafficPatternLearner.init();
 
+  const nmsClient = new NmsClient();
+  const nmsTools = new NmsToolSuite(nmsClient);
+
   const rscRootDir = process.env.NOC_RSC_DIR ?? path.resolve(dataDir, '../mikrotik-rsc');
   const rscBackupManager = new RscBackupManager({
     rscRootDir,
@@ -312,6 +317,7 @@ export async function createNocServer() {
     aiMemoryStore,
     rscBackupManager,
     trafficPatternLearner,
+    nmsTools,
     externalPingTargets,
   });
 
@@ -705,6 +711,132 @@ export async function createNocServer() {
       const message = err instanceof Error ? err.message : 'Gagal mencari sesi pelanggan';
       res.status(400).json({ success: false, error: message });
     }
+  });
+
+  // --- ADT Monitoring NMS (Same-Host Loopback OLT HiOSO/HSGQ + GenieACS Modem) ---
+  const NmsRebootSchema = z.object({
+    query: z.string().trim().min(2).max(80),
+  });
+  const NmsWifiUpdateSchema = z.object({
+    query: z.string().trim().min(2).max(80),
+    ssid: z.string().trim().max(32).optional(),
+    password: z.string().max(63).optional(),
+  });
+
+  app.get('/api/nms/health', requireAdmin, async (_req, res) => {
+    try {
+      if (!nmsTools.isConfigured) {
+        res.json({
+          success: true,
+          data: {
+            configured: false,
+            pendingActions: [],
+            summary: null,
+          },
+        });
+        return;
+      }
+      const { summary } = await nmsTools.cekGangguanJaringan();
+      res.json({
+        success: true,
+        data: {
+          configured: true,
+          summary,
+          pendingActions: nmsTools.listPendingActions(),
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menghubungi ADT Monitoring NMS';
+      res.status(502).json({ success: false, error: message });
+    }
+  });
+
+  app.get('/api/nms/customers', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const rawQ = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      if (rawQ.length < 2 || rawQ.length > 80) {
+        res.status(400).json({ success: false, error: 'Masukkan minimal 2 karakter (nama, PPPoE, atau MAC)' });
+        return;
+      }
+      const result = await nmsTools.cekPelanggan(rawQ);
+      res.json({ success: true, data: result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mencari pelanggan di ADT Monitoring NMS';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.get('/api/nms/wifi', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const rawQ = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      if (rawQ.length < 2 || rawQ.length > 80) {
+        res.status(400).json({ success: false, error: 'Masukkan minimal 2 karakter (nama, PPPoE, atau MAC)' });
+        return;
+      }
+      const result = await nmsTools.cekPerangkatWifi(rawQ);
+      res.json({ success: true, data: result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mengambil data Wi-Fi GenieACS';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/nms/actions/reboot', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const { query } = NmsRebootSchema.parse(req.body ?? {});
+      const actor = (req as Request & { nocUser?: string }).nocUser ?? 'Admin NOC';
+      const result = await nmsTools.requestRebootModem(query, actor);
+      res.json({
+        success: true,
+        data: { ...result, pendingActions: nmsTools.listPendingActions() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal verifikasi reboot modem';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/nms/actions/wifi', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const body = NmsWifiUpdateSchema.parse(req.body ?? {});
+      const actor = (req as Request & { nocUser?: string }).nocUser ?? 'Admin NOC';
+      const result = await nmsTools.requestUbahWifi({
+        query: body.query,
+        ssid: body.ssid,
+        password: body.password,
+        requestedBy: actor,
+      });
+      res.json({
+        success: true,
+        data: { ...result, pendingActions: nmsTools.listPendingActions() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menyiapkan perubahan Wi-Fi modem';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/nms/actions/:id/confirm', writeLimiter, requireAdmin, async (req, res) => {
+    try {
+      const actor = (req as Request & { nocUser?: string }).nocUser ?? 'Admin NOC';
+      const result = await nmsTools.confirmPendingAction(String(req.params.id ?? ''), actor);
+      res.json({
+        success: result.ok,
+        data: { ...result, pendingActions: nmsTools.listPendingActions() },
+        ...(result.ok ? {} : { error: result.formattedText }),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal mengeksekusi aksi NMS';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  app.post('/api/nms/actions/:id/cancel', writeLimiter, requireAdmin, (req, res) => {
+    const result = nmsTools.cancelPendingAction(String(req.params.id ?? ''));
+    res.json({
+      success: true,
+      data: { ...result, pendingActions: nmsTools.listPendingActions() },
+    });
   });
 
   // --- MikroTik .rsc Auto-Backup Vault (Stored in separate mikrotik-rsc/ folder) ---

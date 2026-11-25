@@ -33,6 +33,7 @@ import {
 } from './customerLookup.js';
 import type { RscBackupManager } from './rscBackupManager.js';
 import type { TrafficPatternLearner } from './trafficPatternLearner.js';
+import { detectNmsChatIntent, type NmsToolSuite } from './nmsTools.js';
 import {
   composeSpvExecutiveReport,
   composeSpvRecoveryReport,
@@ -138,6 +139,7 @@ export class NocOrchestrator {
   private readonly aiMemoryStore?: AiMemoryStore;
   private readonly rscBackupManager?: RscBackupManager;
   private readonly trafficPatternLearner?: TrafficPatternLearner;
+  private readonly nmsTools?: NmsToolSuite;
   private readonly pendingIncidentsMap = new Map<string, VerifiedIncidentItem>();
   private readonly pendingRecoveriesMap = new Map<
     string,
@@ -173,6 +175,7 @@ export class NocOrchestrator {
     readonly aiMemoryStore?: AiMemoryStore;
     readonly rscBackupManager?: RscBackupManager;
     readonly trafficPatternLearner?: TrafficPatternLearner;
+    readonly nmsTools?: NmsToolSuite;
     readonly externalPingTargets?: readonly string[];
   }) {
     this.routers = options.routers;
@@ -187,6 +190,7 @@ export class NocOrchestrator {
     this.aiMemoryStore = options.aiMemoryStore;
     this.rscBackupManager = options.rscBackupManager;
     this.trafficPatternLearner = options.trafficPatternLearner;
+    this.nmsTools = options.nmsTools;
     this.externalPingTargets =
       options.externalPingTargets && options.externalPingTargets.length > 0
         ? options.externalPingTargets
@@ -304,12 +308,57 @@ export class NocOrchestrator {
       return result;
     }
 
-    // 2. Instant live customer lookup (/cek <user/ip/mac> or "cek pelanggan <nama>")
+    // 1b. ADT Monitoring NMS Tools (OLT Alarms, GenieACS Wi-Fi, Human-Confirmed Reboot & Wi-Fi Change)
+    const nmsIntent = detectNmsChatIntent(question);
+    if (nmsIntent && this.nmsTools?.isConfigured) {
+      let reply = '';
+      if (nmsIntent.tool === 'cek_gangguan_jaringan') {
+        reply = (await this.nmsTools.cekGangguanJaringan()).formattedText;
+      } else if (nmsIntent.tool === 'cek_perangkat_wifi') {
+        reply = (await this.nmsTools.cekPerangkatWifi(nmsIntent.query)).formattedText;
+      } else if (nmsIntent.tool === 'reboot_modem') {
+        reply = (await this.nmsTools.requestRebootModem(nmsIntent.query, userSource)).formattedText;
+      } else if (nmsIntent.tool === 'ubah_wifi_pelanggan') {
+        reply = (
+          await this.nmsTools.requestUbahWifi({
+            query: nmsIntent.query,
+            ssid: nmsIntent.ssid,
+            password: nmsIntent.password,
+            requestedBy: userSource,
+          })
+        ).formattedText;
+      } else if (nmsIntent.tool === 'confirm_action') {
+        reply = (await this.nmsTools.confirmPendingAction(nmsIntent.actionId, userSource)).formattedText;
+      } else if (nmsIntent.tool === 'cancel_action') {
+        reply = this.nmsTools.cancelPendingAction(nmsIntent.actionId).formattedText;
+      }
+      const result = { reply, source: 'SPV NOC · ADT Monitoring NMS' };
+      if (this.aiBridge) {
+        await this.aiBridge.appendConversation('spv-noc', question, result.reply, result.source, userSource);
+      }
+      if (this.aiMemoryStore && nmsIntent.tool !== 'ubah_wifi_pelanggan') {
+        await this.aiMemoryStore.recordConversation(userSource, question, result.reply, result.source);
+      }
+      this.broadcast();
+      return result;
+    }
+
+    // 2. Instant live customer lookup (/cek <user/ip/mac> -> combines MikroTik PPPoE/Hotspot + ADT NMS OLT/Modem!)
     const customerQuery = extractCustomerLookupQuery(question);
     if (customerQuery) {
-      const lookup = await this.lookupCustomer(customerQuery);
-      const reply = formatCustomerLookupPlainText(lookup);
-      const result = { reply, source: 'SPV NOC · Live Customer Scanner' };
+      const [lookup, nmsLookup] = await Promise.all([
+        this.lookupCustomer(customerQuery),
+        this.nmsTools?.isConfigured ? this.nmsTools.cekPelanggan(customerQuery).catch(() => null) : Promise.resolve(null),
+      ]);
+      const parts = [formatCustomerLookupPlainText(lookup)];
+      if (nmsLookup && nmsLookup.items.length > 0) {
+        parts.push('', nmsLookup.formattedText);
+      }
+      const reply = parts.join('\n');
+      const result = {
+        reply,
+        source: nmsLookup && nmsLookup.items.length > 0 ? 'SPV NOC · MikroTik + ADT NMS OLT' : 'SPV NOC · Live Customer Scanner',
+      };
       if (this.aiBridge) {
         await this.aiBridge.appendConversation('spv-noc', question, result.reply, result.source, userSource);
       }

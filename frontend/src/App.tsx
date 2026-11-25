@@ -18,6 +18,7 @@ import type { CameraControlApi } from './OfficeScene';
 import type { MonitorPingFeed } from './pingScreenTexture';
 import TopologyMapModal from './TopologyMapModal';
 import { CustomerLookupPanel, RscBackupVaultPanel } from './SpvToolsTabs';
+import { NmsOltPanel } from './NmsOltPanel';
 import {
   useNocLive,
   type LiveAgentDutyRole,
@@ -2009,7 +2010,7 @@ function SpvNocCommandModal({
 }) {
   const spv = snapshot.spvNoc;
   const memory = snapshot.aiMemory;
-  const [tab, setTab] = useState<'chat' | 'customers' | 'rsc' | 'reports' | 'memory'>('chat');
+  const [tab, setTab] = useState<'chat' | 'customers' | 'nms' | 'rsc' | 'reports' | 'memory'>('chat');
   const [question, setQuestion] = useState('');
   const [newFactText, setNewFactText] = useState('');
   const [newFactTopic, setNewFactTopic] = useState('SOP & Topologi');
@@ -2115,6 +2116,9 @@ function SpvNocCommandModal({
           <button type="button" className={tab === 'customers' ? 'is-active' : ''} onClick={() => setTab('customers')}>
             🔍 Cek Pelanggan
           </button>
+          <button type="button" className={tab === 'nms' ? 'is-active' : ''} onClick={() => setTab('nms')}>
+            📡 OLT &amp; Modem
+          </button>
           <button type="button" className={tab === 'rsc' ? 'is-active' : ''} onClick={() => setTab('rsc')}>
             💾 Backup .rsc ({snapshot.rscBackups?.entries.length ?? 0})
           </button>
@@ -2128,6 +2132,8 @@ function SpvNocCommandModal({
 
         {tab === 'customers' ? (
           <CustomerLookupPanel onSearch={onSearchCustomers} onOpenRouter={onOpenRouter} />
+        ) : tab === 'nms' ? (
+          <NmsOltPanel />
         ) : tab === 'rsc' ? (
           <RscBackupVaultPanel
             rscBackups={snapshot.rscBackups}
