@@ -1037,4 +1037,64 @@ describe('Human-in-the-Loop Approval Store & Deterministic Agent Diagnosis', () 
 
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
+
+  it('never creates false ENABLE_INTERFACE tickets for active/non-disabled links or LAN login typos', () => {
+    const crs = DEFAULT_ROUTERS.find((r) => r.id === 'crs-backbone-02')!;
+    const linkDownLog = {
+      id: 'log-1',
+      routerId: crs.id,
+      sourceIp: crs.host,
+      timestamp: new Date().toISOString(),
+      topics: ['interface', 'info'],
+      severity: 'info' as const,
+      message: 'sfp1-MONGKONAI link down',
+    };
+
+    // Case 1: Port is UP & running right now -> must NOT create ticket!
+    const upTel = {
+      routerId: crs.id,
+      timestamp: new Date().toISOString(),
+      reachable: true,
+      uptime: '5d',
+      version: '6.48.6',
+      boardName: 'CRS106',
+      cpuLoadPercent: 10,
+      memoryUsedPercent: 30,
+      temperatureC: 42,
+      voltageV: 24,
+      activePppoeCount: 0,
+      activeHotspotCount: 0,
+      hotspotHostCount: 0,
+      dhcpLeaseCount: 0,
+      bgpPeersEstablished: 0,
+      bgpPeersTotal: 0,
+      interfaces: [{ name: 'sfp1-MONGKONAI', running: true, disabled: false, rxMbps: 50, txMbps: 20 }],
+      status: 'healthy' as const,
+    };
+    assert.equal(deterministicDiagnosis(crs, upTel, [linkDownLog]).requiresAction, false);
+
+    // Case 2: Port is physically down (`running: false`) but NOT disabled (`disabled: false`) -> must NOT propose `/interface enable`!
+    const physDownTel = {
+      ...upTel,
+      interfaces: [{ name: 'sfp1-MONGKONAI', running: false, disabled: false, rxMbps: 0, txMbps: 0 }],
+    };
+    assert.equal(deterministicDiagnosis(crs, physDownTel, [linkDownLog]).requiresAction, false);
+
+    // Case 3: Port IS actually disabled (`disabled: true`) -> validly proposes ENABLE_INTERFACE
+    const disabledTel = {
+      ...upTel,
+      interfaces: [{ name: 'sfp1-MONGKONAI', running: false, disabled: true, rxMbps: 0, txMbps: 0 }],
+    };
+    const resDisabled = deterministicDiagnosis(crs, disabledTel, [linkDownLog]);
+    assert.equal(resDisabled.requiresAction, true);
+    assert.equal(resDisabled.proposal?.actionType, 'ENABLE_INTERFACE');
+
+    // Case 4: Local LAN IP login typo must NOT propose firewall block
+    const lanTypoLog = {
+      ...linkDownLog,
+      id: 'log-2',
+      message: 'login failure for user admin from 192.168.88.50 via winbox',
+    };
+    assert.equal(deterministicDiagnosis(crs, upTel, [lanTypoLog]).requiresAction, false);
+  });
 });

@@ -124,6 +124,7 @@ export class NocOrchestrator {
   private readonly historyMap = new Map<string, readonly TelemetryPoint[]>();
   private readonly logsMap = new Map<string, readonly SyslogEntry[]>();
   private readonly seenLogIds = new Set<string>();
+  private readonly logSeededRouters = new Set<string>();
   private globalLogs: readonly SyslogEntry[] = [];
   private spvReports: readonly SpvReportEntry[] = [];
   private readonly cooldownMap = new Map<string, number>();
@@ -1179,6 +1180,9 @@ export class NocOrchestrator {
       );
       for (const { telemetry: tel, apiLogs } of results) {
         this.recordTelemetry(tel);
+        if (tel.reachable && tel.interfaces.length > 0) {
+          await this.approvalStore.autoResolveRecoveredInterfaceTickets(tel.routerId, tel.interfaces);
+        }
         if (apiLogs.length > 0) {
           await this.mergePolledLogs(tel.routerId, apiLogs);
         }
@@ -1348,6 +1352,9 @@ export class NocOrchestrator {
   }
 
   private async mergePolledLogs(routerId: string, apiLogs: readonly SyslogEntry[]): Promise<void> {
+    const isInitialSeed = !this.logSeededRouters.has(routerId);
+    this.logSeededRouters.add(routerId);
+
     const fresh: SyslogEntry[] = [];
     for (const entry of apiLogs) {
       if (this.seenLogIds.has(entry.id)) continue;
@@ -1364,6 +1371,10 @@ export class NocOrchestrator {
     const prev = this.logsMap.get(routerId) ?? [];
     this.logsMap.set(routerId, [...fresh, ...prev].slice(0, 60));
     this.globalLogs = [...fresh, ...this.globalLogs].slice(0, MAX_GLOBAL_LOGS);
+
+    // On the very first /log/print after server boot, seed historical MikroTik buffer logs into UI
+    // WITHOUT triggering ghost approval tickets or alerts for days-old events!
+    if (isInitialSeed) return;
 
     const freshRadius = fresh.filter((e) => isRadiusTimeoutMessage(e.message));
     const hasRadiusOrAnomaly = freshRadius.length > 0 || fresh.some((e) => isAnomalySyslog(e));

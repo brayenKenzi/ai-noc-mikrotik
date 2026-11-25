@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { ActionProposalPayload, ApprovalTicket, RouterDevice } from './types.js';
+import type { ActionProposalPayload, ApprovalTicket, InterfaceMetric, RouterDevice } from './types.js';
 
 /**
  * Immutable Human-in-the-Loop (HITL) Approval Store with serialized atomic JSON persistence.
@@ -39,6 +39,42 @@ export class ApprovalGateStore {
   getPendingForRouter(routerId: string): readonly ApprovalTicket[] {
     this.expireStaleTickets();
     return this.tickets.filter((t) => t.routerId === routerId && t.status === 'PENDING');
+  }
+
+  async autoResolveRecoveredInterfaceTickets(
+    routerId: string,
+    interfaces: readonly InterfaceMetric[],
+  ): Promise<boolean> {
+    if (interfaces.length === 0) return false;
+    const ifMap = new Map(interfaces.map((i) => [i.name.toLowerCase(), i]));
+    let changed = false;
+    const nowIso = new Date().toISOString();
+
+    this.tickets = this.tickets.map((t) => {
+      if (t.routerId !== routerId || t.status !== 'PENDING' || t.proposal.actionType !== 'ENABLE_INTERFACE') {
+        return t;
+      }
+      const targetIf = (t.proposal.parameters.interface ?? '').toLowerCase();
+      const liveIf = ifMap.get(targetIf);
+      if (liveIf && !liveIf.disabled) {
+        changed = true;
+        return {
+          ...t,
+          status: 'EXPIRED' as const,
+          decidedBy: 'Auto-Verify',
+          decidedAt: nowIso,
+          executionResult: liveIf.running
+            ? `Otomatis ditutup: interface ${liveIf.name} sudah UP & aktif (tidak di-disable).`
+            : `Otomatis ditutup: interface ${liveIf.name} tidak dalam status disabled.`,
+        };
+      }
+      return t;
+    });
+
+    if (changed) {
+      await this.persist();
+    }
+    return changed;
   }
 
   getById(ticketId: string): ApprovalTicket | undefined {

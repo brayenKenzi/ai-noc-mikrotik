@@ -193,6 +193,16 @@ function normalizeLlmOutput(
   }
 }
 
+function isPrivateLanIp(ip: string): boolean {
+  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('127.')) return true;
+  const m = /^172\.(\d+)\./.exec(ip);
+  if (m?.[1]) {
+    const oct = Number(m[1]);
+    if (oct >= 16 && oct <= 31) return true;
+  }
+  return false;
+}
+
 export function deterministicDiagnosis(
   router: RouterDevice,
   telemetry: RouterTelemetry | null,
@@ -220,10 +230,19 @@ export function deterministicDiagnosis(
     }
   }
 
-  // 1. Check brute-force login failure from external IP
+  // Track interfaces that already have a NEWER "link up" log (recentLogs is newest-first)
+  const recoveredInLogs = new Set<string>();
+
+  // 1. Check logs (newest-first)
   for (const log of recentLogs) {
+    const linkUpMatch = /([a-zA-Z0-9._-]+)\s+link up/i.exec(log.message);
+    if (linkUpMatch?.[1]) {
+      recoveredInLogs.add(linkUpMatch[1].toLowerCase());
+    }
+
+    // Check brute-force login failure from external public IP (skip private LAN admin typos)
     const bruteMatch = /login failure for user\s+\S+\s+from\s+(\d{1,3}(?:\.\d{1,3}){3})/i.exec(log.message);
-    if (bruteMatch?.[1]) {
+    if (bruteMatch?.[1] && !isPrivateLanIp(bruteMatch[1])) {
       const attackerIp = bruteMatch[1];
       try {
         const params = { ip: attackerIp, list: 'AI_NOC_BLOCKLIST', timeout: '24h' };
@@ -245,11 +264,25 @@ export function deterministicDiagnosis(
       }
     }
 
-    // 2. Check WAN / ISP link down -> propose failover backup route
+    // 2. Check WAN / interface link down — MUST cross-check live telemetry & newer link-up logs!
     const linkDownMatch = /([a-zA-Z0-9._-]+)\s+link down/i.exec(log.message);
     if (linkDownMatch?.[1]) {
       const downIface = linkDownMatch[1];
-      if (downIface.toLowerCase().includes('isp') || downIface.toLowerCase().includes('wan')) {
+      const downLower = downIface.toLowerCase();
+
+      // If a newer log already confirmed link up -> historical flap, skip!
+      if (recoveredInLogs.has(downLower)) {
+        continue;
+      }
+
+      // Cross-check live RouterOS interface state from telemetry!
+      const liveIf = telemetry?.interfaces.find((i) => i.name.toLowerCase() === downLower);
+      if (liveIf && liveIf.running && !liveIf.disabled) {
+        // Port is currently UP & active! Old historical log -> NEVER create a false link-down ticket!
+        continue;
+      }
+
+      if (downLower.includes('isp') || downLower.includes('wan')) {
         const params = { routeComment: 'ISP_BACKUP', distance: '1' };
         const built = validateAndBuildPlaybook('SWITCH_BACKUP_ROUTE', params, nocServerIp);
         return {
@@ -266,20 +299,27 @@ export function deterministicDiagnosis(
         };
       }
 
-      const params = { interface: downIface };
-      const built = validateAndBuildPlaybook('ENABLE_INTERFACE', params, nocServerIp);
-      return {
-        incidentSummary: `Interface ${downIface} terputus pada ${router.name}`,
-        rootCauseAnalysis: `Log melaporkan ${downIface} link down. Pastikan kabel/SFP terpasang baik atau aktifkan ulang interface bila sempat ter-disable.`,
-        requiresAction: true,
-        proposal: {
-          actionType: 'ENABLE_INTERFACE',
-          parameters: params,
-          previewCommand: built.previewCommand,
-          rollbackCommand: built.rollbackCommand,
-          riskLevel: built.riskLevel,
-        },
-      };
+      // ONLY propose `/interface enable` if live telemetry proves the port is actually DISABLED (`disabled === true`)!
+      // If `disabled === false`, the port is NOT disabled (physical FO/SFP issue handled by LinkWatchdog, not `/interface enable`!).
+      if (liveIf && liveIf.disabled) {
+        const params = { interface: downIface };
+        const built = validateAndBuildPlaybook('ENABLE_INTERFACE', params, nocServerIp);
+        return {
+          incidentSummary: `Interface ${downIface} dalam status DISABLED pada ${router.name}`,
+          rootCauseAnalysis: `Telemetri live memastikan port ${downIface} sedang nonaktif (disabled=true). Aktifkan kembali bila penonaktifan tidak disengaja.`,
+          requiresAction: true,
+          proposal: {
+            actionType: 'ENABLE_INTERFACE',
+            parameters: params,
+            previewCommand: built.previewCommand,
+            rollbackCommand: built.rollbackCommand,
+            riskLevel: built.riskLevel,
+          },
+        };
+      }
+
+      // Port is enabled (not disabled) or live telemetry unavailable -> never spam false `/interface enable`!
+      continue;
     }
 
     // 3. Check stuck PPPoE session
