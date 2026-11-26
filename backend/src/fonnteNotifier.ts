@@ -20,6 +20,8 @@ const DEFAULT_ALERT_SETTINGS: AlertSettings = {
   pingLossCritPct: 40,
   pingConfirmCount: 3,
   sfpRxCritDbm: -24,
+  waChatEnabled: true,
+  waAllowedSenders: [],
   alertCooldownSec: 3600, // 60 minutes anti-spam cooldown per incident
 };
 

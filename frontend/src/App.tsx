@@ -1349,7 +1349,57 @@ function AdminAccountModal({
   const [cooldownMin, setCooldownMin] = useState(String(Math.round((alertSettings?.alertCooldownSec ?? 3600) / 60)));
   const [sfpRxCritDbm, setSfpRxCritDbm] = useState(String(alertSettings?.sfpRxCritDbm ?? -24));
   const [pppoeMassDropCount, setPppoeMassDropCount] = useState(String(alertSettings?.pppoeMassDropCount ?? 15));
+  const [waChatEnabled, setWaChatEnabled] = useState(alertSettings?.waChatEnabled ?? true);
+  const [allowedSenders, setAllowedSenders] = useState<string[]>(() =>
+    alertSettings?.waAllowedSenders && alertSettings.waAllowedSenders.length > 0
+      ? [...alertSettings.waAllowedSenders]
+      : alertSettings?.waTarget
+        ? [alertSettings.waTarget]
+        : [],
+  );
+  const [newSenderInput, setNewSenderInput] = useState('');
+  const [webhookPath, setWebhookPath] = useState<string | null>(null);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [waMsg, setWaMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/alerts/webhook-info', { credentials: 'include' });
+        const json = (await res.json()) as { success: boolean; data?: { configured: boolean; webhookPath: string | null } };
+        if (json.success && json.data?.webhookPath) {
+          setWebhookPath(json.data.webhookPath);
+        }
+      } catch {
+        /* abaikan */
+      }
+    })();
+  }, []);
+
+  const handleAddSender = () => {
+    const clean = newSenderInput.trim();
+    if (clean.length < 5) return;
+    if (!allowedSenders.includes(clean)) {
+      setAllowedSenders((prev) => [...prev, clean]);
+    }
+    setNewSenderInput('');
+  };
+
+  const handleRemoveSender = (target: string) => {
+    setAllowedSenders((prev) => prev.filter((item) => item !== target));
+  };
+
+  const handleCopyWebhook = async () => {
+    if (!webhookPath) return;
+    const fullUrl = `${window.location.origin}${webhookPath}`;
+    try {
+      await navigator.clipboard.writeText(fullUrl);
+      setCopiedWebhook(true);
+      window.setTimeout(() => setCopiedWebhook(false), 2200);
+    } catch {
+      /* abaikan */
+    }
+  };
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1384,6 +1434,8 @@ function AdminAccountModal({
         alertCooldownSec: Math.max(60, (Number(cooldownMin) || 60) * 60),
         sfpRxCritDbm: Math.max(-40, Math.min(-10, Number(sfpRxCritDbm) || -24)),
         pppoeMassDropCount: Math.max(5, Math.min(500, Number(pppoeMassDropCount) || 15)),
+        waChatEnabled,
+        waAllowedSenders: allowedSenders,
       });
       setWaMsg({ ok: true, text: 'Filter anti-spam WA & Laporan Harian berhasil disimpan!' });
     } catch (err) {
@@ -1476,6 +1528,100 @@ function AdminAccountModal({
                 <input type="checkbox" checked={waEnabled} onChange={(e) => setWaEnabled(e.target.checked)} />
                 <span>Mode Anti-Spam: HANYA kirim alert segera jika KRITIS terkonfirmasi ({pingConfirmCount}x berturut)</span>
               </label>
+              <label>
+                <input type="checkbox" checked={waChatEnabled} onChange={(e) => setWaChatEnabled(e.target.checked)} />
+                <span>Chat 2 Arah SPV NOC via WA (pemicu awalan titik &ldquo;.&rdquo;, mis. <code>.status</code>, <code>.cek user</code>, <code>.olt</code>)</span>
+              </label>
+            </div>
+
+            <div
+              style={{
+                gridColumn: '1 / -1',
+                padding: '10px',
+                borderRadius: '10px',
+                background: '#f8fafc',
+                border: '1px solid #e2e8f0',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                <strong style={{ fontSize: '0.8rem', color: '#0f172a' }}>
+                  🛡️ Whitelist Pengirim WA SPV NOC ({allowedSenders.length})
+                </strong>
+                {webhookPath && (
+                  <button
+                    type="button"
+                    className="noc-btn-sim"
+                    style={{ marginTop: 0, fontSize: '0.72rem', padding: '4px 8px' }}
+                    onClick={() => void handleCopyWebhook()}
+                    title="Salin Webhook URL untuk ditempel di Dashboard Fonnte → Device → Webhook URL"
+                  >
+                    {copiedWebhook ? '✅ Webhook Tersalin!' : '📋 Copy Webhook URL'}
+                  </button>
+                )}
+              </div>
+              <small style={{ display: 'block', color: '#64748b', marginBottom: '6px' }}>
+                Hanya nomor WA atau ID Grup WA (<code>...@g.us</code>) di daftar ini yang boleh memanggil SPV NOC AI pakai awalan <code>.</code>
+              </small>
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                <input
+                  value={newSenderInput}
+                  onChange={(e) => setNewSenderInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddSender();
+                    }
+                  }}
+                  placeholder="Tambah nomor WA (0851...) atau ID Grup (...g.us)"
+                  style={{ flex: 1 }}
+                />
+                <button type="button" className="noc-btn-sim" style={{ marginTop: 0 }} onClick={handleAddSender}>
+                  + Tambah
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {allowedSenders.length === 0 ? (
+                  <small style={{ color: '#94a3b8' }}>
+                    Kosong (otomatis memakai nomor WA Tujuan utama di atas)
+                  </small>
+                ) : (
+                  allowedSenders.map((s) => (
+                    <span
+                      key={s}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '3px 9px',
+                        borderRadius: '999px',
+                        background: '#e0f2fe',
+                        color: '#0369a1',
+                        fontSize: '0.76rem',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {s}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveSender(s)}
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          color: '#dc2626',
+                          cursor: 'pointer',
+                          padding: 0,
+                          margin: 0,
+                          fontWeight: 700,
+                          lineHeight: 1,
+                        }}
+                        title={`Hapus ${s} dari whitelist`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
             </div>
             {waMsg && (
               <p className={`noc-feedback ${waMsg.ok ? 'is-ok' : 'is-err'}`} style={{ gridColumn: '1 / -1' }}>

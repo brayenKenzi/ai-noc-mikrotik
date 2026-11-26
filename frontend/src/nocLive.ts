@@ -151,6 +151,8 @@ export interface LiveAlertSettings {
   pingConfirmCount?: number;
   pppoeMassDropCount?: number;
   sfpRxCritDbm?: number;
+  waChatEnabled?: boolean;
+  waAllowedSenders?: string[];
   alertCooldownSec: number;
   waTokenConfigured: boolean;
 }

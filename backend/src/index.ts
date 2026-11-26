@@ -15,6 +15,11 @@ import { SecretVault } from './secretVault.js';
 import { AdminAuthManager } from './auth.js';
 import { AntigravityBridgeStore } from './antigravityBridge.js';
 import { FonnteWhatsappNotifier } from './fonnteNotifier.js';
+import {
+  FonnteWebhookProcessor,
+  verifyWebhookSecret,
+  type FonnteIncomingPayload,
+} from './fonnteWebhook.js';
 import { TopologyStore } from './topologyStore.js';
 import { AiMemoryStore } from './aiMemoryStore.js';
 import { RscBackupManager } from './rscBackupManager.js';
@@ -77,6 +82,18 @@ const AlertSettingsPatchSchema = z.object({
   pingConfirmCount: z.number().int().min(1).max(10).optional(),
   pppoeMassDropCount: z.number().int().min(5).max(500).optional(),
   sfpRxCritDbm: z.number().min(-40).max(-10).optional(),
+  waChatEnabled: z.boolean().optional(),
+  waAllowedSenders: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(5)
+        .max(64)
+        .regex(/^[0-9+\-@a-zA-Z._\s]+$/, 'Format nomor/grup WA tidak valid'),
+    )
+    .max(50)
+    .optional(),
   alertCooldownSec: z.number().int().min(60).max(86400).optional(),
 });
 
@@ -332,6 +349,7 @@ export async function createNocServer() {
   });
   app.use(cors({ origin: true, credentials: true }));
   app.use(express.json({ limit: '64kb' }));
+  app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
   const adminToken = (process.env.NOC_ADMIN_TOKEN ?? '').trim();
   const writeLimiter = createWriteRateLimiter(90);
@@ -612,6 +630,37 @@ export async function createNocServer() {
       const message = err instanceof Error ? err.message : 'Gagal menghubungi SPV NOC';
       res.status(400).json({ success: false, error: message });
     }
+  });
+
+  const fonnteWebhook = new FonnteWebhookProcessor();
+  const fonnteWebhookSecret = (process.env.FONNTE_WEBHOOK_SECRET ?? '').trim();
+
+  app.get('/api/alerts/webhook-info', requireAdmin, (_req, res) => {
+    res.json({
+      success: true,
+      data: {
+        configured: fonnteWebhookSecret.length > 0,
+        webhookPath: fonnteWebhookSecret ? `/api/webhooks/fonnte/${fonnteWebhookSecret}` : null,
+      },
+    });
+  });
+
+  // Public Webhook Endpoint for Fonnte incoming WhatsApp messages (protected by secret URL + sender whitelist + dot prefix)
+  app.post('/api/webhooks/fonnte/:secret', writeLimiter, (req, res) => {
+    if (!fonnteWebhookSecret || !verifyWebhookSecret(String(req.params.secret ?? ''), fonnteWebhookSecret)) {
+      res.status(403).json({ success: false, error: 'Webhook secret tidak valid' });
+      return;
+    }
+    const settings = fonnteNotifier.getSettings();
+    const outcome = fonnteWebhook.handleIncoming({
+      payload: (req.body ?? {}) as FonnteIncomingPayload,
+      waChatEnabled: settings.waChatEnabled !== false,
+      allowedSenders: settings.waAllowedSenders ?? [],
+      fallbackTarget: settings.waTarget,
+      onAskSpv: (prompt, actor) => orchestrator.askSpvNoc(prompt, undefined, actor),
+      onReplyWa: (target, message) => fonnteNotifier.sendRaw(target, message),
+    });
+    res.json({ success: true, data: outcome });
   });
 
   app.post('/api/spv/send-summary-wa', writeLimiter, requireAdmin, async (req, res) => {

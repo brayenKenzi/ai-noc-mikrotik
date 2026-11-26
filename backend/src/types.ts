@@ -268,6 +268,8 @@ export interface AlertSettings {
   readonly pingConfirmCount: number;
   readonly pppoeMassDropCount?: number;
   readonly sfpRxCritDbm?: number;
+  readonly waChatEnabled?: boolean;
+  readonly waAllowedSenders?: readonly string[];
   readonly alertCooldownSec: number;
 }
 
