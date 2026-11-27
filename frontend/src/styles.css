@@ -5,8 +5,8 @@ body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; overflow: hidden
   background: radial-gradient(130% 90% at 50% 15%, #fff7ee 0%, #f3e6d6 55%, #e2cfbb 100%); }
 .ko[data-night] { color: #fff; background: radial-gradient(130% 90% at 50% 15%, #2b2147 0%, #150f26 60%, #0b0816 100%); }
 .ko .ko-stage { position: absolute; inset: 0; aspect-ratio: auto; min-height: 0; border: 0; border-radius: 0; background: none; }
-.ko-sheet { position: fixed; inset: 0; z-index: 5; display: grid; place-items: end center; background: rgb(0 0 0 / 0.35); }
-.ko-sheet-in { width: min(480px, 100%); margin: 16px; padding: 20px; border-radius: 20px; background: #fff; color: #1b1330; }
+.ko-sheet { position: fixed; inset: 0; z-index: 5; display: grid; place-items: end center; background: rgb(0 0 0 / 0.35); overflow-y: auto; }
+.ko-sheet-in { width: min(480px, 100%); max-height: min(90dvh, 860px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; margin: 16px; padding: 20px; border-radius: 20px; background: #fff; color: #1b1330; }
 .ko-sheet-in h3 { margin: 0 0 8px; } .ko-sheet-in h3 small { font-weight: 500; color: #6a6380; }
 .ko-sheet-sum { padding: 10px; border-radius: 12px; background: #f4f1f9; }
 .ko-sheet-urgent { color: #c4173f; font-weight: 600; }
@@ -1924,9 +1924,12 @@ body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; overflow: hidden
     width: 100vw !important;
     max-width: 100vw !important;
     margin: 0 !important;
-    padding: 16px 14px max(18px, env(safe-area-inset-bottom)) !important;
+    padding: 16px 14px max(24px, env(safe-area-inset-bottom)) !important;
     border-radius: 20px 20px 0 0 !important;
     max-height: 88dvh !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain !important;
+    -webkit-overflow-scrolling: touch !important;
   }
   .noc-metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

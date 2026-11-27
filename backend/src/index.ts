@@ -658,7 +658,7 @@ export async function createNocServer() {
       allowedSenders: settings.waAllowedSenders ?? [],
       fallbackTarget: settings.waTarget,
       onAskSpv: (prompt, actor) => orchestrator.askSpvNoc(prompt, undefined, actor),
-      onReplyWa: (target, message) => fonnteNotifier.sendRaw(target, message),
+      onReplyWa: (target, message, inboxId) => fonnteNotifier.sendRaw(target, message, inboxId),
     });
     res.json({ success: true, data: outcome });
   });

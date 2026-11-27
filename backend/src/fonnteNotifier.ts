@@ -226,16 +226,22 @@ export class FonnteWhatsappNotifier {
     return this.sendRaw(target, text);
   }
 
-  async sendRaw(target: string, message: string): Promise<FonnteSendResult> {
+  async sendRaw(target: string, message: string, inboxId?: string): Promise<FonnteSendResult> {
     if (!this.token || !target.trim()) {
       return { ok: false, detail: 'Token atau target Fonnte kosong' };
     }
     try {
+      const cleanTarget = target.trim();
       const cleanMessage = sanitizePlainAiText(message);
       const form = new URLSearchParams();
-      form.set('target', target.trim());
+      form.set('target', cleanTarget);
       form.set('message', cleanMessage);
-      form.set('countryCode', '62');
+      if (!cleanTarget.toLowerCase().includes('@g.us')) {
+        form.set('countryCode', '62');
+      }
+      if (inboxId && inboxId.trim()) {
+        form.set('inboxid', inboxId.trim());
+      }
 
       const resp = await fetch('https://api.fonnte.com/send', {
         method: 'POST',

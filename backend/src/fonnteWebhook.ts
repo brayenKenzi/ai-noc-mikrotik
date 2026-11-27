@@ -10,6 +10,7 @@ export interface FonnteIncomingPayload {
   readonly text?: string;
   readonly pengirim?: string;
   readonly pesan?: string;
+  readonly inboxid?: string | number;
 }
 
 export interface ParsedWaCommand {
@@ -176,7 +177,7 @@ export class FonnteWebhookProcessor {
     readonly allowedSenders: readonly string[];
     readonly fallbackTarget?: string;
     readonly onAskSpv: (prompt: string, actor: string) => Promise<{ readonly reply: string; readonly source: string }>;
-    readonly onReplyWa: (target: string, message: string) => Promise<unknown>;
+    readonly onReplyWa: (target: string, message: string, inboxId?: string) => Promise<unknown>;
   }): { readonly accepted: boolean; readonly reason: string } {
     if (!params.waChatEnabled) {
       return { accepted: false, reason: 'wa_chat_disabled' };
@@ -186,6 +187,7 @@ export class FonnteWebhookProcessor {
     const device = String(params.payload.device ?? '').trim();
     const member = params.payload.member ? String(params.payload.member).trim() : undefined;
     const senderName = String(params.payload.name ?? '').trim();
+    const inboxId = params.payload.inboxid !== undefined ? String(params.payload.inboxid).trim() : undefined;
     const rawMsg = String(params.payload.message ?? params.payload.text ?? params.payload.pesan ?? '').trim();
 
     if (!sender || !rawMsg) {
@@ -193,7 +195,12 @@ export class FonnteWebhookProcessor {
     }
 
     // Anti-loop: never reply to messages originating from the bot's own device number
-    if (device && normalizeWaIdentifier(sender) === normalizeWaIdentifier(device)) {
+    if (
+      device &&
+      (normalizeWaIdentifier(sender) === normalizeWaIdentifier(device) ||
+        (member && normalizeWaIdentifier(member) === normalizeWaIdentifier(device)))
+    ) {
+      console.log(`[FonnteWebhook] ignored self_loop sender=${sender} member=${member ?? '-'}`);
       return { accepted: false, reason: 'self_loop_ignored' };
     }
 
@@ -205,6 +212,7 @@ export class FonnteWebhookProcessor {
 
     // Strict Whitelist check (supports personal WA numbers & @g.us group IDs)
     if (!isWaSenderWhitelisted(sender, member, params.allowedSenders, params.fallbackTarget)) {
+      console.log(`[FonnteWebhook] blocked sender_not_whitelisted sender=${sender} member=${member ?? '-'}`);
       return { accepted: false, reason: 'sender_not_whitelisted' };
     }
 
@@ -220,19 +228,31 @@ export class FonnteWebhookProcessor {
     this.recentMsgIds.set(dedupKey, now);
 
     const actorLabel = senderName ? `WhatsApp (${senderName})` : `WhatsApp (${sender})`;
+    console.log(`[FonnteWebhook] accepted sender=${sender} member=${member ?? '-'} isMenu=${parsed.isMenuHelp}`);
 
     void (async () => {
       try {
         if (parsed.isMenuHelp) {
-          await params.onReplyWa(sender, buildWaSpvMenuText());
+          const sendRes = (await params.onReplyWa(sender, buildWaSpvMenuText(), inboxId)) as
+            | { ok?: boolean; detail?: string }
+            | undefined;
+          if (sendRes && sendRes.ok === false) {
+            console.warn(`[FonnteWebhook] reply failed target=${sender}: ${sendRes.detail ?? 'unknown'}`);
+          }
           return;
         }
         const res = await params.onAskSpv(parsed.prompt, actorLabel);
         const cleanReply = sanitizePlainAiText(res.reply);
-        await params.onReplyWa(sender, `${cleanReply}\n\n[${res.source}]`);
+        const sendRes = (await params.onReplyWa(sender, `${cleanReply}\n\n[${res.source}]`, inboxId)) as
+          | { ok?: boolean; detail?: string }
+          | undefined;
+        if (sendRes && sendRes.ok === false) {
+          console.warn(`[FonnteWebhook] reply failed target=${sender}: ${sendRes.detail ?? 'unknown'}`);
+        }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Gagal memproses permintaan SPV NOC';
-        await params.onReplyWa(sender, `Maaf, terjadi kendala saat memproses permintaan SPV NOC: ${errMsg}`).catch(() => {});
+        console.warn(`[FonnteWebhook] error target=${sender}: ${errMsg}`);
+        await params.onReplyWa(sender, `Maaf, terjadi kendala saat memproses permintaan SPV NOC: ${errMsg}`, inboxId).catch(() => {});
       }
     })();
 
